@@ -1,0 +1,9 @@
+apiVersion: sleepy.atha.gr/v1alpha1
+kind: SleepyService
+metadata:
+  labels:
+    app.kubernetes.io/name: sleepyservice
+    app.kubernetes.io/managed-by: kustomize
+  name: sleepyservice-sample
+spec:
+  # TODO(user): Add fields here

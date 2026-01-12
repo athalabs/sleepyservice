@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- sleepy_v1alpha1_sleepyservice.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
