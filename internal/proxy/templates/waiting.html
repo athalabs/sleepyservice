@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.ServiceName}} - Starting Up</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #e8e8e8;
+        }
+
+        .container {
+            text-align: center;
+            padding: 2rem;
+            max-width: 500px;
+            width: 90%;
+        }
+
+        .logo {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 2rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .logo svg {
+            width: 48px;
+            height: 48px;
+            fill: white;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+
+        .service-name {
+            color: #667eea;
+        }
+
+        .subtitle {
+            color: #a0a0a0;
+            font-size: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .progress-container {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            height: 8px;
+            overflow: hidden;
+            margin-bottom: 1rem;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            transition: width 0.5s ease;
+            width: 0%;
+        }
+
+        .status-message {
+            font-size: 0.9rem;
+            color: #b0b0b0;
+            margin-bottom: 0.5rem;
+            min-height: 1.5em;
+        }
+
+        .progress-percent {
+            font-size: 0.85rem;
+            color: #808080;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(102, 126, 234, 0.3);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .steps {
+            margin-top: 2rem;
+            text-align: left;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1.25rem;
+        }
+
+        .step {
+            display: flex;
+            align-items: center;
+            padding: 0.5rem 0;
+            font-size: 0.9rem;
+            color: #808080;
+        }
+
+        .step.active {
+            color: #e8e8e8;
+        }
+
+        .step.completed {
+            color: #4ade80;
+        }
+
+        .step-icon {
+            width: 24px;
+            height: 24px;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .step-icon svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .step.completed .step-icon svg {
+            fill: #4ade80;
+        }
+
+        .step.active .step-icon svg {
+            fill: #667eea;
+        }
+
+        .step:not(.completed):not(.active) .step-icon svg {
+            fill: #505050;
+        }
+
+        .error-container {
+            display: none;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-top: 1.5rem;
+        }
+
+        .error-container.visible {
+            display: block;
+        }
+
+        .error-title {
+            color: #ef4444;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .error-message {
+            color: #fca5a5;
+            font-size: 0.9rem;
+        }
+
+        .retry-button {
+            margin-top: 1rem;
+            padding: 0.75rem 1.5rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .retry-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .ready-container {
+            display: none;
+        }
+
+        .ready-container.visible {
+            display: block;
+        }
+
+        .ready-icon {
+            width: 60px;
+            height: 60px;
+            margin: 0 auto 1rem;
+            background: #4ade80;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .ready-icon svg {
+            width: 32px;
+            height: 32px;
+            fill: white;
+        }
+
+        .redirect-message {
+            color: #4ade80;
+            font-size: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+            </svg>
+        </div>
+
+        <div id="waking-content">
+            <h1>Waking up <span class="service-name">{{.ServiceName}}</span></h1>
+            <p class="subtitle">This service was hibernated to save resources</p>
+
+            <div class="progress-container">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+
+            <p class="status-message">
+                <span class="spinner"></span>
+                <span id="status-text">{{.Status.Message}}</span>
+            </p>
+            <p class="progress-percent"><span id="progress-percent">{{.Status.Progress}}</span>% complete</p>
+
+            <div class="steps">
+                <div class="step" id="step-db">
+                    <span class="step-icon">
+                        <svg viewBox="0 0 24 24"><path d="M12 3C7.58 3 4 4.79 4 7v10c0 2.21 3.58 4 8 4s8-1.79 8-4V7c0-2.21-3.58-4-8-4zm0 2c3.87 0 6 1.5 6 2s-2.13 2-6 2-6-1.5-6-2 2.13-2 6-2zm6 12c0 .5-2.13 2-6 2s-6-1.5-6-2v-2.23c1.61.78 3.72 1.23 6 1.23s4.39-.45 6-1.23V17zm0-5c0 .5-2.13 2-6 2s-6-1.5-6-2V9.77c1.61.78 3.72 1.23 6 1.23s4.39-.45 6-1.23V12z"/></svg>
+                    </span>
+                    <span>Starting database</span>
+                </div>
+                <div class="step" id="step-app">
+                    <span class="step-icon">
+                        <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+                    </span>
+                    <span>Starting application</span>
+                </div>
+                <div class="step" id="step-health">
+                    <span class="step-icon">
+                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                    </span>
+                    <span>Health check</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="error-container" id="error-container">
+            <p class="error-title">Failed to wake up</p>
+            <p class="error-message" id="error-message"></p>
+            <button class="retry-button" onclick="retry()">Try Again</button>
+        </div>
+
+        <div class="ready-container" id="ready-container">
+            <div class="ready-icon">
+                <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            </div>
+            <h1>Ready!</h1>
+            <p class="redirect-message">Redirecting you now...</p>
+        </div>
+    </div>
+
+    <script>
+        const progressBar = document.getElementById('progress-bar');
+        const statusText = document.getElementById('status-text');
+        const progressPercent = document.getElementById('progress-percent');
+        const wakingContent = document.getElementById('waking-content');
+        const errorContainer = document.getElementById('error-container');
+        const errorMessage = document.getElementById('error-message');
+        const readyContainer = document.getElementById('ready-container');
+
+        const stepDb = document.getElementById('step-db');
+        const stepApp = document.getElementById('step-app');
+        const stepHealth = document.getElementById('step-health');
+
+        function updateUI(status) {
+            progressBar.style.width = status.progress + '%';
+            statusText.textContent = status.message;
+            progressPercent.textContent = status.progress;
+
+            // Update steps
+            stepDb.className = 'step';
+            stepApp.className = 'step';
+            stepHealth.className = 'step';
+
+            if (status.progress >= 10) stepDb.className = 'step active';
+            if (status.progress >= 50) {
+                stepDb.className = 'step completed';
+                stepApp.className = 'step active';
+            }
+            if (status.progress >= 85) {
+                stepApp.className = 'step completed';
+                stepHealth.className = 'step active';
+            }
+            if (status.progress >= 100) {
+                stepHealth.className = 'step completed';
+            }
+
+            // Handle state changes
+            if (status.state === 'awake') {
+                showReady();
+            } else if (status.state === 'sleeping' && status.progress === 0 && status.message.includes('Failed')) {
+                showError(status.message);
+            }
+        }
+
+        function showError(message) {
+            wakingContent.style.display = 'none';
+            readyContainer.classList.remove('visible');
+            errorContainer.classList.add('visible');
+            errorMessage.textContent = message;
+        }
+
+        function showReady() {
+            wakingContent.style.display = 'none';
+            errorContainer.classList.remove('visible');
+            readyContainer.classList.add('visible');
+
+            // Redirect after a short delay
+            setTimeout(() => {
+                window.location.reload();
+            }, 1500);
+        }
+
+        function retry() {
+            fetch('/_wake/trigger', { method: 'POST' })
+                .then(() => {
+                    errorContainer.classList.remove('visible');
+                    wakingContent.style.display = 'block';
+                    progressBar.style.width = '0%';
+                    statusText.textContent = 'Retrying...';
+                    progressPercent.textContent = '0';
+                })
+                .catch(console.error);
+        }
+
+        // Connect to SSE for live updates
+        function connectSSE() {
+            const eventSource = new EventSource('/_wake/events');
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const status = JSON.parse(event.data);
+                    updateUI(status);
+                } catch (e) {
+                    console.error('Failed to parse status:', e);
+                }
+            };
+
+            eventSource.onerror = function() {
+                eventSource.close();
+                // Reconnect after a delay
+                setTimeout(connectSSE, 3000);
+            };
+        }
+
+        // Initialize with current status
+        updateUI({
+            state: "{{.Status.State}}",
+            message: "{{.Status.Message}}",
+            progress: {{.Status.Progress}}
+        });
+
+        // Connect to SSE
+        connectSSE();
+    </script>
+</body>
+</html>
