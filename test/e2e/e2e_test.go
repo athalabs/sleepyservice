@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -124,7 +125,7 @@ var _ = Describe("Manager", Ordered, func() {
 	SetDefaultEventuallyTimeout(2 * time.Minute)
 	SetDefaultEventuallyPollingInterval(time.Second)
 
-	Context("Manager", func() {
+	Context("Manager", Ordered, func() {
 		It("should run successfully", func() {
 			By("validating that the controller-manager pod is running as expected")
 			verifyControllerUp := func(g Gomega) {
@@ -157,6 +158,377 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyControllerUp).Should(Succeed())
 		})
 
+		It("should successfully create and reconcile a SleepyService", func() {
+			By("waiting for SleepyService CRD to be ready")
+			verifyCRDReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "crd", "sleepyservices.sleepy.atha.gr")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "SleepyService CRD should exist")
+			}
+			Eventually(verifyCRDReady, 30*time.Second).Should(Succeed())
+
+			By("creating a sample deployment to manage")
+			sampleDeploymentYAML := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sample
+  template:
+    metadata:
+      labels:
+        app: sample
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-app
+  namespace: default
+spec:
+  selector:
+    app: sample
+  ports:
+  - port: 80
+    targetPort: 80
+`
+			sampleFile := filepath.Join("/tmp", "sample-deployment.yaml")
+			err := os.WriteFile(sampleFile, []byte(sampleDeploymentYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := exec.Command("kubectl", "apply", "-f", sampleFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a SleepyService CR")
+			sleepyServiceYAML := `
+apiVersion: sleepy.atha.gr/v1alpha1
+kind: SleepyService
+metadata:
+  name: sample-hibernating-service
+  namespace: default
+spec:
+  backendService:
+    type: ClusterIP
+    ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 80
+  healthPath: /
+  wakeTimeout: 5m
+  idleTimeout: 10m
+  components:
+  - name: app
+    type: Deployment
+    ref:
+      name: sample-app
+    replicas: 1
+`
+			hsFile := filepath.Join("/tmp", "hibernating-service.yaml")
+			err = os.WriteFile(hsFile, []byte(sleepyServiceYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", hsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying that proxy deployment is created")
+			verifyProxyDeployment := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment",
+					"sample-hibernating-service-wakeproxy",
+					"-n", "default",
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"), "Proxy deployment should have 1 ready replica")
+			}
+			Eventually(verifyProxyDeployment, 2*time.Minute).Should(Succeed())
+
+			By("verifying that proxy service is created")
+			cmd = exec.Command("kubectl", "get", "service",
+				"sample-hibernating-service",
+				"-n", "default")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking that the SleepyService has the proxy deployment in status")
+			verifyStatus := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sleepyservice",
+					"sample-hibernating-service",
+					"-n", "default",
+					"-o", "jsonpath={.status.proxyDeployment}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("sample-hibernating-service-wakeproxy"))
+			}
+			Eventually(verifyStatus).Should(Succeed())
+
+			By("verifying that proxy deployment uses the operator image")
+			cmd = exec.Command("kubectl", "get", "deployment",
+				"sample-hibernating-service-wakeproxy",
+				"-n", "default",
+				"-o", "jsonpath={.spec.template.spec.containers[0].image}")
+			imageOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(imageOutput).To(Equal(projectImage), "Proxy should use operator image")
+
+			By("verifying that proxy deployment has correct command")
+			cmd = exec.Command("kubectl", "get", "deployment",
+				"sample-hibernating-service-wakeproxy",
+				"-n", "default",
+				"-o", "jsonpath={.spec.template.spec.containers[0].command[0]}")
+			commandOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(commandOutput).To(Equal("/proxy"), "Proxy should use /proxy command")
+
+			By("cleaning up the test resources")
+			cmd = exec.Command("kubectl", "delete", "-f", hsFile)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "-f", sampleFile)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should hibernate and wake up a service correctly", func() {
+			By("creating a test application deployment")
+			testAppYAML := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-webapp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-webapp
+  template:
+    metadata:
+      labels:
+        app: test-webapp
+    spec:
+      containers:
+      - name: webapp
+        image: kennethreitz/httpbin:latest
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /status/200
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+`
+			testAppFile := filepath.Join("/tmp", "test-webapp.yaml")
+			err := os.WriteFile(testAppFile, []byte(testAppYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := exec.Command("kubectl", "apply", "-f", testAppFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for test app to be ready")
+			verifyAppReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-webapp",
+					"-n", "default", "-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"), "Test app should have 1 ready replica")
+			}
+			Eventually(verifyAppReady, 2*time.Minute).Should(Succeed())
+
+			By("creating a SleepyService with short idle timeout")
+			hsYAML := `
+apiVersion: sleepy.atha.gr/v1alpha1
+kind: SleepyService
+metadata:
+  name: test-hibernating-webapp
+  namespace: default
+spec:
+  healthPath: /status/200
+  wakeTimeout: 3m
+  idleTimeout: 10s
+  backendService:
+    ports:
+    - port: 80
+      targetPort: 80
+  components:
+  - name: webapp
+    type: Deployment
+    ref:
+      name: test-webapp
+    replicas: 1
+`
+			hsFile := filepath.Join("/tmp", "test-hibernating-webapp.yaml")
+			err = os.WriteFile(hsFile, []byte(hsYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", hsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for proxy to be deployed")
+			verifyProxyReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment",
+					"test-hibernating-webapp-wakeproxy",
+					"-n", "default",
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"), "Proxy should have 1 ready replica")
+			}
+			Eventually(verifyProxyReady, 2*time.Minute).Should(Succeed())
+
+			By("waiting idleTimeout (10s) + buffer (5s) for idle timeout to cause hibernation")
+			time.Sleep(15 * time.Second)
+
+			By("verifying the app has hibernated (scaled to 0)")
+			verifyHibernated := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-webapp",
+					"-n", "default", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("0"), "App should be scaled to 0 after idle timeout")
+			}
+			Eventually(verifyHibernated, 30*time.Second).Should(Succeed())
+
+			By("sending a request through the proxy to trigger wake-up")
+			// Create a test pod to curl the proxy service
+			curlPodName := "curl-wakeup-test"
+			cmd = exec.Command("kubectl", "run", curlPodName,
+				"--image=curlimages/curl:latest",
+				"--restart=Never",
+				"-n", "default",
+				"--command", "--", "sleep", "300")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for curl pod to be ready")
+			verifyCurlPodReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", curlPodName,
+					"-n", "default", "-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running"), "Curl pod should be running")
+			}
+			Eventually(verifyCurlPodReady, time.Minute).Should(Succeed())
+
+			By("making a request through the proxy (should trigger wake-up)")
+			cmd = exec.Command("kubectl", "exec", curlPodName, "-n", "default", "--",
+				"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+				"http://test-hibernating-webapp/status/200")
+			_, _ = utils.Run(cmd) // May fail initially as app is waking up
+
+			By("verifying the app wakes up (scales back to 1)")
+			verifyWokenUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-webapp",
+					"-n", "default", "-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"), "App should scale back to 1 after wake-up")
+			}
+			Eventually(verifyWokenUp, 3*time.Minute).Should(Succeed())
+
+			By("verifying requests succeed after wake-up")
+			verifyRequestSucceeds := func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", curlPodName, "-n", "default", "--",
+					"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+					"http://test-hibernating-webapp/status/200")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("200"), "Request should return 200 after wake-up")
+			}
+			Eventually(verifyRequestSucceeds, time.Minute).Should(Succeed())
+
+			By("cleaning up test resources")
+			cmd = exec.Command("kubectl", "delete", "pod", curlPodName, "-n", "default", "--force", "--grace-period=0")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "-f", hsFile)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "-f", testAppFile)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should verify metrics for SleepyService reconciliation", func() {
+			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
+			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
+				"--clusterrole=sleepyservice-metrics-reader",
+				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
+			)
+			_, err := utils.Run(cmd)
+			// Ignore error if already exists
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+			}
+
+			By("getting the service account token")
+			token, err := serviceAccountToken()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(token).NotTo(BeEmpty())
+
+			By("creating the curl-metrics pod to access the metrics endpoint")
+			cmd = exec.Command("kubectl", "run", "curl-metrics-hs", "--restart=Never",
+				"--namespace", namespace,
+				"--image=curlimages/curl:latest",
+				"--overrides",
+				fmt.Sprintf(`{
+					"spec": {
+						"containers": [{
+							"name": "curl",
+							"image": "curlimages/curl:latest",
+							"command": ["/bin/sh", "-c"],
+							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
+							"securityContext": {
+								"allowPrivilegeEscalation": false,
+								"capabilities": {
+									"drop": ["ALL"]
+								},
+								"runAsNonRoot": true,
+								"runAsUser": 1000,
+								"seccompProfile": {
+									"type": "RuntimeDefault"
+								}
+							}
+						}],
+						"serviceAccount": "%s"
+					}
+				}`, token, metricsServiceName, namespace, serviceAccountName))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics-hs pod")
+
+			By("waiting for the curl-metrics-hs pod to complete")
+			verifyCurlUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "curl-metrics-hs",
+					"-o", "jsonpath={.status.phase}",
+					"-n", namespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
+			}
+			Eventually(verifyCurlUp, 5*time.Minute).Should(Succeed())
+
+			By("getting the metrics by checking curl-metrics-hs logs")
+			cmd = exec.Command("kubectl", "logs", "curl-metrics-hs", "-n", namespace)
+			metricsOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl-metrics-hs pod")
+			Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+			Expect(metricsOutput).To(ContainSubstring("controller_runtime_reconcile_total"))
+
+			By("cleaning up the curl-metrics-hs pod")
+			cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics-hs", "-n", namespace)
+			_, _ = utils.Run(cmd)
+		})
+
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
@@ -164,7 +536,10 @@ var _ = Describe("Manager", Ordered, func() {
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+			// Ignore error if already exists from previous test
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+			}
 
 			By("validating that the metrics service is available")
 			cmd = exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
@@ -244,15 +619,6 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
-
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput := getMetricsOutput()
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
 	})
 })
 

@@ -54,6 +54,17 @@ patches:
 #  target:
 #    kind: Deployment
 
+# Copy the manager image to OPERATOR_IMAGE env var
+replacements:
+- source:
+    kind: Deployment
+    fieldPath: spec.template.spec.containers.[name=manager].image
+  targets:
+  - select:
+      kind: Deployment
+    fieldPaths:
+    - spec.template.spec.containers.[name=manager].env.[name=OPERATOR_IMAGE].value
+
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
 # Uncomment the following replacements to add the cert-manager CA injection annotations
 #replacements:
