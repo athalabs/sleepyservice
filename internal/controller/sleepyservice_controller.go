@@ -54,7 +54,6 @@ type SleepyServiceReconciler struct {
 func (r *SleepyServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// Fetch the SleepyService
 	var hs sleepyv1alpha1.SleepyService
 	if err := r.Get(ctx, req.NamespacedName, &hs); err != nil {
 		if errors.IsNotFound(err) {
@@ -63,91 +62,107 @@ func (r *SleepyServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// Handle deletion
 	if !hs.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &hs)
 	}
 
-	// Add finalizer if needed
-	if !controllerutil.ContainsFinalizer(&hs, finalizerName) {
-		controllerutil.AddFinalizer(&hs, finalizerName)
-		if err := r.Update(ctx, &hs); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Ensure proxy RBAC resources exist
-	if err := r.ensureProxyServiceAccount(ctx, &hs); err != nil {
-		log.Error(err, "Failed to ensure proxy service account")
+	if err := r.ensureFinalizer(ctx, &hs); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureProxyRole(ctx, &hs); err != nil {
-		log.Error(err, "Failed to ensure proxy role")
+	if err := r.ensureProxyResources(ctx, &hs); err != nil {
+		log.Error(err, "Failed to ensure proxy resources")
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureProxyRoleBinding(ctx, &hs); err != nil {
-		log.Error(err, "Failed to ensure proxy role binding")
-		return ctrl.Result{}, err
-	}
-
-	// Ensure backend Service exists (if using new API)
-	if err := r.ensureBackendService(ctx, &hs); err != nil {
-		log.Error(err, "Failed to ensure backend service")
-		return ctrl.Result{}, err
-	}
-
-	// Ensure proxy deployment exists
-	if err := r.ensureProxyDeployment(ctx, &hs); err != nil {
-		log.Error(err, "Failed to ensure proxy deployment")
-		return ctrl.Result{}, err
-	}
-
-	// Ensure proxy service exists
-	if err := r.ensureProxyService(ctx, &hs); err != nil {
-		log.Error(err, "Failed to ensure proxy service")
-		return ctrl.Result{}, err
-	}
-
-	// Update component statuses
 	if err := r.updateComponentStatuses(ctx, &hs); err != nil {
 		log.Error(err, "Failed to update component statuses")
 		return ctrl.Result{}, err
 	}
 
-	// Update status with backend Service name (if using new API)
-	if hs.Spec.BackendService != nil {
-		backendSvcName := fmt.Sprintf("%s-actual", hs.Name)
-		hs.Status.BackendService = backendSvcName
-	}
+	r.updateBackendServiceStatus(&hs)
 
-	// Reconcile state based on DesiredState (status subresource pattern)
 	if err := r.reconcileState(ctx, &hs); err != nil {
 		log.Error(err, "Failed to reconcile state")
 		return ctrl.Result{}, err
 	}
 
-	// Check for idle timeout
-	if hs.Spec.IdleTimeout.Duration > 0 && hs.Status.State == sleepyv1alpha1.StateAwake {
-		if hs.Status.LastActivity != nil {
-			idleDuration := time.Since(hs.Status.LastActivity.Time)
-			if idleDuration > hs.Spec.IdleTimeout.Duration {
-				log.Info("Idle timeout reached, hibernating")
-				return r.reconcileHibernate(ctx, &hs)
-			}
-			// Requeue to check idle timeout again
-			requeueAfter := hs.Spec.IdleTimeout.Duration - idleDuration
-			return ctrl.Result{RequeueAfter: requeueAfter}, nil
-		}
+	if result, shouldReturn := r.checkIdleTimeout(ctx, &hs); shouldReturn {
+		return result, nil
 	}
 
-	// Update status
 	if err := r.Status().Update(ctx, &hs); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *SleepyServiceReconciler) ensureFinalizer(ctx context.Context, hs *sleepyv1alpha1.SleepyService) error {
+	if !controllerutil.ContainsFinalizer(hs, finalizerName) {
+		controllerutil.AddFinalizer(hs, finalizerName)
+		if err := r.Update(ctx, hs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *SleepyServiceReconciler) ensureProxyResources(ctx context.Context, hs *sleepyv1alpha1.SleepyService) error {
+	if err := r.ensureProxyServiceAccount(ctx, hs); err != nil {
+		return fmt.Errorf("failed to ensure proxy service account: %w", err)
+	}
+
+	if err := r.ensureProxyRole(ctx, hs); err != nil {
+		return fmt.Errorf("failed to ensure proxy role: %w", err)
+	}
+
+	if err := r.ensureProxyRoleBinding(ctx, hs); err != nil {
+		return fmt.Errorf("failed to ensure proxy role binding: %w", err)
+	}
+
+	if err := r.ensureBackendService(ctx, hs); err != nil {
+		return fmt.Errorf("failed to ensure backend service: %w", err)
+	}
+
+	if err := r.ensureProxyDeployment(ctx, hs); err != nil {
+		return fmt.Errorf("failed to ensure proxy deployment: %w", err)
+	}
+
+	if err := r.ensureProxyService(ctx, hs); err != nil {
+		return fmt.Errorf("failed to ensure proxy service: %w", err)
+	}
+
+	return nil
+}
+
+func (r *SleepyServiceReconciler) updateBackendServiceStatus(hs *sleepyv1alpha1.SleepyService) {
+	if hs.Spec.BackendService != nil {
+		backendSvcName := fmt.Sprintf("%s-actual", hs.Name)
+		hs.Status.BackendService = backendSvcName
+	}
+}
+
+func (r *SleepyServiceReconciler) checkIdleTimeout(ctx context.Context, hs *sleepyv1alpha1.SleepyService) (ctrl.Result, bool) {
+	log := log.FromContext(ctx)
+
+	if hs.Spec.IdleTimeout.Duration <= 0 || hs.Status.State != sleepyv1alpha1.StateAwake {
+		return ctrl.Result{}, false
+	}
+
+	if hs.Status.LastActivity == nil {
+		return ctrl.Result{}, false
+	}
+
+	idleDuration := time.Since(hs.Status.LastActivity.Time)
+	if idleDuration > hs.Spec.IdleTimeout.Duration {
+		log.Info("Idle timeout reached, hibernating")
+		result, _ := r.reconcileHibernate(ctx, hs)
+		return result, true
+	}
+
+	requeueAfter := hs.Spec.IdleTimeout.Duration - idleDuration
+	return ctrl.Result{RequeueAfter: requeueAfter}, true
 }
 
 func (r *SleepyServiceReconciler) reconcileDelete(ctx context.Context, hs *sleepyv1alpha1.SleepyService) (ctrl.Result, error) {
@@ -223,75 +238,99 @@ func (r *SleepyServiceReconciler) reconcileState(ctx context.Context, hs *sleepy
 }
 
 func (r *SleepyServiceReconciler) scaleUpComponents(ctx context.Context, hs *sleepyv1alpha1.SleepyService) error {
-	log := log.FromContext(ctx)
-
 	for _, comp := range hs.Spec.Components {
 		ns := comp.Ref.Namespace
 		if ns == "" {
 			ns = hs.Namespace
 		}
 
+		var err error
 		switch comp.Type {
 		case sleepyv1alpha1.ComponentTypeDeployment:
-			replicas := int32(1)
-			if comp.Replicas != nil {
-				replicas = *comp.Replicas
-			}
-
-			var deploy appsv1.Deployment
-			if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: ns}, &deploy); err != nil {
-				return fmt.Errorf("failed to get Deployment %s: %w", comp.Ref.Name, err)
-			}
-
-			if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas == 0 {
-				log.Info("Scaling up Deployment", "name", comp.Ref.Name, "replicas", replicas)
-				deploy.Spec.Replicas = &replicas
-				if err := r.Update(ctx, &deploy); err != nil {
-					return fmt.Errorf("failed to scale up Deployment %s: %w", comp.Ref.Name, err)
-				}
-			}
-
+			err = r.scaleUpDeployment(ctx, ns, comp)
 		case sleepyv1alpha1.ComponentTypeStatefulSet:
-			replicas := int32(1)
-			if comp.Replicas != nil {
-				replicas = *comp.Replicas
-			}
-
-			var sts appsv1.StatefulSet
-			if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: ns}, &sts); err != nil {
-				return fmt.Errorf("failed to get StatefulSet %s: %w", comp.Ref.Name, err)
-			}
-
-			if sts.Spec.Replicas == nil || *sts.Spec.Replicas == 0 {
-				log.Info("Scaling up StatefulSet", "name", comp.Ref.Name, "replicas", replicas)
-				sts.Spec.Replicas = &replicas
-				if err := r.Update(ctx, &sts); err != nil {
-					return fmt.Errorf("failed to scale up StatefulSet %s: %w", comp.Ref.Name, err)
-				}
-			}
-
+			err = r.scaleUpStatefulSet(ctx, ns, comp)
 		case sleepyv1alpha1.ComponentTypeCNPGCluster:
-			// Wake CNPG cluster by removing hibernation annotation
-			cluster := &unstructured.Unstructured{}
-			cluster.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "postgresql.cnpg.io",
-				Version: "v1",
-				Kind:    "Cluster",
-			})
+			err = r.scaleUpCNPGCluster(ctx, ns, comp)
+		}
 
-			if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: ns}, cluster); err != nil {
-				return fmt.Errorf("failed to get CNPG Cluster %s: %w", comp.Ref.Name, err)
-			}
+		if err != nil {
+			return err
+		}
+	}
 
-			annotations := cluster.GetAnnotations()
-			if annotations != nil && annotations["cnpg.io/hibernation"] == "on" {
-				log.Info("Waking CNPG Cluster", "name", comp.Ref.Name)
-				delete(annotations, "cnpg.io/hibernation")
-				cluster.SetAnnotations(annotations)
-				if err := r.Update(ctx, cluster); err != nil {
-					return fmt.Errorf("failed to wake CNPG Cluster %s: %w", comp.Ref.Name, err)
-				}
-			}
+	return nil
+}
+
+func (r *SleepyServiceReconciler) scaleUpDeployment(ctx context.Context, namespace string, comp sleepyv1alpha1.Component) error {
+	log := log.FromContext(ctx)
+
+	replicas := int32(1)
+	if comp.Replicas != nil {
+		replicas = *comp.Replicas
+	}
+
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: namespace}, &deploy); err != nil {
+		return fmt.Errorf("failed to get Deployment %s: %w", comp.Ref.Name, err)
+	}
+
+	if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas == 0 {
+		log.Info("Scaling up Deployment", "name", comp.Ref.Name, "replicas", replicas)
+		deploy.Spec.Replicas = &replicas
+		if err := r.Update(ctx, &deploy); err != nil {
+			return fmt.Errorf("failed to scale up Deployment %s: %w", comp.Ref.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (r *SleepyServiceReconciler) scaleUpStatefulSet(ctx context.Context, namespace string, comp sleepyv1alpha1.Component) error {
+	log := log.FromContext(ctx)
+
+	replicas := int32(1)
+	if comp.Replicas != nil {
+		replicas = *comp.Replicas
+	}
+
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: namespace}, &sts); err != nil {
+		return fmt.Errorf("failed to get StatefulSet %s: %w", comp.Ref.Name, err)
+	}
+
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas == 0 {
+		log.Info("Scaling up StatefulSet", "name", comp.Ref.Name, "replicas", replicas)
+		sts.Spec.Replicas = &replicas
+		if err := r.Update(ctx, &sts); err != nil {
+			return fmt.Errorf("failed to scale up StatefulSet %s: %w", comp.Ref.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (r *SleepyServiceReconciler) scaleUpCNPGCluster(ctx context.Context, namespace string, comp sleepyv1alpha1.Component) error {
+	log := log.FromContext(ctx)
+
+	cluster := &unstructured.Unstructured{}
+	cluster.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "postgresql.cnpg.io",
+		Version: "v1",
+		Kind:    "Cluster",
+	})
+
+	if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: namespace}, cluster); err != nil {
+		return fmt.Errorf("failed to get CNPG Cluster %s: %w", comp.Ref.Name, err)
+	}
+
+	annotations := cluster.GetAnnotations()
+	if annotations != nil && annotations["cnpg.io/hibernation"] == "on" {
+		log.Info("Waking CNPG Cluster", "name", comp.Ref.Name)
+		delete(annotations, "cnpg.io/hibernation")
+		cluster.SetAnnotations(annotations)
+		if err := r.Update(ctx, cluster); err != nil {
+			return fmt.Errorf("failed to wake CNPG Cluster %s: %w", comp.Ref.Name, err)
 		}
 	}
 
@@ -299,71 +338,95 @@ func (r *SleepyServiceReconciler) scaleUpComponents(ctx context.Context, hs *sle
 }
 
 func (r *SleepyServiceReconciler) scaleDownComponents(ctx context.Context, hs *sleepyv1alpha1.SleepyService) error {
-	log := log.FromContext(ctx)
-
 	for _, comp := range hs.Spec.Components {
 		ns := comp.Ref.Namespace
 		if ns == "" {
 			ns = hs.Namespace
 		}
 
+		var err error
 		switch comp.Type {
 		case sleepyv1alpha1.ComponentTypeDeployment:
-			var deploy appsv1.Deployment
-			if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: ns}, &deploy); err != nil {
-				return fmt.Errorf("failed to get Deployment %s: %w", comp.Ref.Name, err)
-			}
-
-			if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas > 0 {
-				log.Info("Scaling down Deployment", "name", comp.Ref.Name)
-				replicas := int32(0)
-				deploy.Spec.Replicas = &replicas
-				if err := r.Update(ctx, &deploy); err != nil {
-					return fmt.Errorf("failed to scale down Deployment %s: %w", comp.Ref.Name, err)
-				}
-			}
-
+			err = r.scaleDownDeployment(ctx, ns, comp)
 		case sleepyv1alpha1.ComponentTypeStatefulSet:
-			var sts appsv1.StatefulSet
-			if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: ns}, &sts); err != nil {
-				return fmt.Errorf("failed to get StatefulSet %s: %w", comp.Ref.Name, err)
-			}
-
-			if sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {
-				log.Info("Scaling down StatefulSet", "name", comp.Ref.Name)
-				replicas := int32(0)
-				sts.Spec.Replicas = &replicas
-				if err := r.Update(ctx, &sts); err != nil {
-					return fmt.Errorf("failed to scale down StatefulSet %s: %w", comp.Ref.Name, err)
-				}
-			}
-
+			err = r.scaleDownStatefulSet(ctx, ns, comp)
 		case sleepyv1alpha1.ComponentTypeCNPGCluster:
-			// Hibernate CNPG cluster by setting hibernation annotation
-			cluster := &unstructured.Unstructured{}
-			cluster.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "postgresql.cnpg.io",
-				Version: "v1",
-				Kind:    "Cluster",
-			})
+			err = r.scaleDownCNPGCluster(ctx, ns, comp)
+		}
 
-			if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: ns}, cluster); err != nil {
-				return fmt.Errorf("failed to get CNPG Cluster %s: %w", comp.Ref.Name, err)
-			}
+		if err != nil {
+			return err
+		}
+	}
 
-			annotations := cluster.GetAnnotations()
-			if annotations == nil {
-				annotations = make(map[string]string)
-			}
+	return nil
+}
 
-			if annotations["cnpg.io/hibernation"] != "on" {
-				log.Info("Hibernating CNPG Cluster", "name", comp.Ref.Name)
-				annotations["cnpg.io/hibernation"] = "on"
-				cluster.SetAnnotations(annotations)
-				if err := r.Update(ctx, cluster); err != nil {
-					return fmt.Errorf("failed to hibernate CNPG Cluster %s: %w", comp.Ref.Name, err)
-				}
-			}
+func (r *SleepyServiceReconciler) scaleDownDeployment(ctx context.Context, namespace string, comp sleepyv1alpha1.Component) error {
+	log := log.FromContext(ctx)
+
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: namespace}, &deploy); err != nil {
+		return fmt.Errorf("failed to get Deployment %s: %w", comp.Ref.Name, err)
+	}
+
+	if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas > 0 {
+		log.Info("Scaling down Deployment", "name", comp.Ref.Name)
+		replicas := int32(0)
+		deploy.Spec.Replicas = &replicas
+		if err := r.Update(ctx, &deploy); err != nil {
+			return fmt.Errorf("failed to scale down Deployment %s: %w", comp.Ref.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (r *SleepyServiceReconciler) scaleDownStatefulSet(ctx context.Context, namespace string, comp sleepyv1alpha1.Component) error {
+	log := log.FromContext(ctx)
+
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: namespace}, &sts); err != nil {
+		return fmt.Errorf("failed to get StatefulSet %s: %w", comp.Ref.Name, err)
+	}
+
+	if sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {
+		log.Info("Scaling down StatefulSet", "name", comp.Ref.Name)
+		replicas := int32(0)
+		sts.Spec.Replicas = &replicas
+		if err := r.Update(ctx, &sts); err != nil {
+			return fmt.Errorf("failed to scale down StatefulSet %s: %w", comp.Ref.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (r *SleepyServiceReconciler) scaleDownCNPGCluster(ctx context.Context, namespace string, comp sleepyv1alpha1.Component) error {
+	log := log.FromContext(ctx)
+
+	cluster := &unstructured.Unstructured{}
+	cluster.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "postgresql.cnpg.io",
+		Version: "v1",
+		Kind:    "Cluster",
+	})
+
+	if err := r.Get(ctx, types.NamespacedName{Name: comp.Ref.Name, Namespace: namespace}, cluster); err != nil {
+		return fmt.Errorf("failed to get CNPG Cluster %s: %w", comp.Ref.Name, err)
+	}
+
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	if annotations["cnpg.io/hibernation"] != "on" {
+		log.Info("Hibernating CNPG Cluster", "name", comp.Ref.Name)
+		annotations["cnpg.io/hibernation"] = "on"
+		cluster.SetAnnotations(annotations)
+		if err := r.Update(ctx, cluster); err != nil {
+			return fmt.Errorf("failed to hibernate CNPG Cluster %s: %w", comp.Ref.Name, err)
 		}
 	}
 
@@ -627,54 +690,21 @@ func (r *SleepyServiceReconciler) ensureProxyService(ctx context.Context, hs *sl
 func (r *SleepyServiceReconciler) ensureBackendService(ctx context.Context, hs *sleepyv1alpha1.SleepyService) error {
 	log := log.FromContext(ctx)
 
-	// Check if backend Service creation is disabled
-	if hs.Spec.BackendService != nil && hs.Spec.BackendService.Enabled != nil && !*hs.Spec.BackendService.Enabled {
+	if r.isBackendServiceDisabled(hs) {
 		log.Info("Backend Service creation disabled")
 		return nil
 	}
 
-	// Find the last application component (Deployment or StatefulSet)
-	// Last one is typically the main app, after dependencies like databases
-	var appComponent *sleepyv1alpha1.Component
-	for i := range hs.Spec.Components {
-		if hs.Spec.Components[i].Type == sleepyv1alpha1.ComponentTypeDeployment ||
-			hs.Spec.Components[i].Type == sleepyv1alpha1.ComponentTypeStatefulSet {
-			appComponent = &hs.Spec.Components[i]
-			// Don't break - keep looping to get the last one
-		}
+	appComponent, err := r.findAppComponent(hs)
+	if err != nil {
+		return err
 	}
 
-	if appComponent == nil {
-		return fmt.Errorf("no Deployment or StatefulSet component found")
+	podSelector, err := r.getPodSelector(ctx, hs, appComponent)
+	if err != nil {
+		return err
 	}
 
-	// Get the Deployment/StatefulSet to extract pod selectors
-	ns := appComponent.Ref.Namespace
-	if ns == "" {
-		ns = hs.Namespace
-	}
-
-	var podSelector map[string]string
-
-	if appComponent.Type == sleepyv1alpha1.ComponentTypeDeployment {
-		var deploy appsv1.Deployment
-		if err := r.Get(ctx, types.NamespacedName{Name: appComponent.Ref.Name, Namespace: ns}, &deploy); err != nil {
-			return fmt.Errorf("failed to get Deployment: %w", err)
-		}
-		podSelector = deploy.Spec.Selector.MatchLabels
-	} else {
-		var sts appsv1.StatefulSet
-		if err := r.Get(ctx, types.NamespacedName{Name: appComponent.Ref.Name, Namespace: ns}, &sts); err != nil {
-			return fmt.Errorf("failed to get StatefulSet: %w", err)
-		}
-		podSelector = sts.Spec.Selector.MatchLabels
-	}
-
-	if len(podSelector) == 0 {
-		return fmt.Errorf("no pod selector labels found on component")
-	}
-
-	// Create the backend Service
 	backendSvcName := fmt.Sprintf("%s-actual", hs.Name)
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -683,51 +713,13 @@ func (r *SleepyServiceReconciler) ensureBackendService(ctx context.Context, hs *
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		// Set owner reference for garbage collection
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		if err := controllerutil.SetControllerReference(hs, svc, r.Scheme); err != nil {
 			return err
 		}
 
-		// Set annotations if provided
-		if hs.Spec.BackendService != nil && len(hs.Spec.BackendService.Annotations) > 0 {
-			if svc.Annotations == nil {
-				svc.Annotations = make(map[string]string)
-			}
-			for k, v := range hs.Spec.BackendService.Annotations {
-				svc.Annotations[k] = v
-			}
-		}
-
-		// Configure Service spec
-		svc.Spec.Selector = podSelector
-
-		// Set service type
-		svcType := corev1.ServiceTypeClusterIP
-		if hs.Spec.BackendService != nil && hs.Spec.BackendService.Type != "" {
-			svcType = hs.Spec.BackendService.Type
-		}
-		svc.Spec.Type = svcType
-
-		// Configure ports
-		ports := r.buildBackendServicePorts(hs)
-		svc.Spec.Ports = ports
-
-		// Optional fields
-		if hs.Spec.BackendService != nil {
-			if hs.Spec.BackendService.ClusterIP != "" {
-				svc.Spec.ClusterIP = hs.Spec.BackendService.ClusterIP
-			}
-			if len(hs.Spec.BackendService.ExternalIPs) > 0 {
-				svc.Spec.ExternalIPs = hs.Spec.BackendService.ExternalIPs
-			}
-			if hs.Spec.BackendService.LoadBalancerIP != "" {
-				svc.Spec.LoadBalancerIP = hs.Spec.BackendService.LoadBalancerIP
-			}
-			if hs.Spec.BackendService.SessionAffinity != "" {
-				svc.Spec.SessionAffinity = hs.Spec.BackendService.SessionAffinity
-			}
-		}
+		r.configureBackendServiceAnnotations(svc, hs)
+		r.configureBackendServiceSpec(svc, hs, podSelector)
 
 		return nil
 	})
@@ -738,6 +730,111 @@ func (r *SleepyServiceReconciler) ensureBackendService(ctx context.Context, hs *
 
 	log.Info("Backend Service ensured", "name", backendSvcName)
 	return nil
+}
+
+func (r *SleepyServiceReconciler) isBackendServiceDisabled(hs *sleepyv1alpha1.SleepyService) bool {
+	return hs.Spec.BackendService != nil && hs.Spec.BackendService.Enabled != nil && !*hs.Spec.BackendService.Enabled
+}
+
+func (r *SleepyServiceReconciler) findAppComponent(hs *sleepyv1alpha1.SleepyService) (*sleepyv1alpha1.Component, error) {
+	var appComponent *sleepyv1alpha1.Component
+	for i := range hs.Spec.Components {
+		if hs.Spec.Components[i].Type == sleepyv1alpha1.ComponentTypeDeployment ||
+			hs.Spec.Components[i].Type == sleepyv1alpha1.ComponentTypeStatefulSet {
+			appComponent = &hs.Spec.Components[i]
+		}
+	}
+
+	if appComponent == nil {
+		return nil, fmt.Errorf("no Deployment or StatefulSet component found")
+	}
+
+	return appComponent, nil
+}
+
+func (r *SleepyServiceReconciler) getPodSelector(ctx context.Context, hs *sleepyv1alpha1.SleepyService, appComponent *sleepyv1alpha1.Component) (map[string]string, error) {
+	ns := appComponent.Ref.Namespace
+	if ns == "" {
+		ns = hs.Namespace
+	}
+
+	var podSelector map[string]string
+	var err error
+
+	if appComponent.Type == sleepyv1alpha1.ComponentTypeDeployment {
+		podSelector, err = r.getDeploymentPodSelector(ctx, ns, appComponent.Ref.Name)
+	} else {
+		podSelector, err = r.getStatefulSetPodSelector(ctx, ns, appComponent.Ref.Name)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(podSelector) == 0 {
+		return nil, fmt.Errorf("no pod selector labels found on component")
+	}
+
+	return podSelector, nil
+}
+
+func (r *SleepyServiceReconciler) getDeploymentPodSelector(ctx context.Context, namespace, name string) (map[string]string, error) {
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &deploy); err != nil {
+		return nil, fmt.Errorf("failed to get Deployment: %w", err)
+	}
+	return deploy.Spec.Selector.MatchLabels, nil
+}
+
+func (r *SleepyServiceReconciler) getStatefulSetPodSelector(ctx context.Context, namespace, name string) (map[string]string, error) {
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sts); err != nil {
+		return nil, fmt.Errorf("failed to get StatefulSet: %w", err)
+	}
+	return sts.Spec.Selector.MatchLabels, nil
+}
+
+func (r *SleepyServiceReconciler) configureBackendServiceAnnotations(svc *corev1.Service, hs *sleepyv1alpha1.SleepyService) {
+	if hs.Spec.BackendService != nil && len(hs.Spec.BackendService.Annotations) > 0 {
+		if svc.Annotations == nil {
+			svc.Annotations = make(map[string]string)
+		}
+		for k, v := range hs.Spec.BackendService.Annotations {
+			svc.Annotations[k] = v
+		}
+	}
+}
+
+func (r *SleepyServiceReconciler) configureBackendServiceSpec(svc *corev1.Service, hs *sleepyv1alpha1.SleepyService, podSelector map[string]string) {
+	svc.Spec.Selector = podSelector
+	svc.Spec.Type = r.getBackendServiceType(hs)
+	svc.Spec.Ports = r.buildBackendServicePorts(hs)
+
+	if hs.Spec.BackendService != nil {
+		r.applyOptionalServiceFields(svc, hs.Spec.BackendService)
+	}
+}
+
+func (r *SleepyServiceReconciler) getBackendServiceType(hs *sleepyv1alpha1.SleepyService) corev1.ServiceType {
+	if hs.Spec.BackendService != nil && hs.Spec.BackendService.Type != "" {
+		return hs.Spec.BackendService.Type
+	}
+	return corev1.ServiceTypeClusterIP
+}
+
+func (r *SleepyServiceReconciler) applyOptionalServiceFields(svc *corev1.Service, backendSvc *sleepyv1alpha1.BackendServiceSpec) {
+	if backendSvc.ClusterIP != "" {
+		svc.Spec.ClusterIP = backendSvc.ClusterIP
+	}
+	if len(backendSvc.ExternalIPs) > 0 {
+		svc.Spec.ExternalIPs = backendSvc.ExternalIPs
+	}
+	if backendSvc.LoadBalancerIP != "" {
+		svc.Spec.LoadBalancerIP = backendSvc.LoadBalancerIP
+	}
+	if backendSvc.SessionAffinity != "" {
+		svc.Spec.SessionAffinity = backendSvc.SessionAffinity
+	}
 }
 
 func (r *SleepyServiceReconciler) buildBackendServicePorts(hs *sleepyv1alpha1.SleepyService) []corev1.ServicePort {
