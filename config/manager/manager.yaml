@@ -63,10 +63,10 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: controller:latest
+        image: ghcr.io/athalabs/sleepyservice:latest
         env:
         - name: OPERATOR_IMAGE
-          value: controller:latest
+          value: ghcr.io/athalabs/sleepyservice:latest
         name: manager
         ports: []
         securityContext:

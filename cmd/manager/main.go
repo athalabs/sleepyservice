@@ -206,7 +206,7 @@ func setupController(mgr ctrl.Manager) {
 	operatorImage := os.Getenv("OPERATOR_IMAGE")
 	if operatorImage == "" {
 		setupLog.Info("OPERATOR_IMAGE not set, using default")
-		operatorImage = "controller:latest"
+		operatorImage = "ghcr.io/athalabs/sleepyservice:latest"
 	}
 
 	if err := (&controller.SleepyServiceReconciler{
