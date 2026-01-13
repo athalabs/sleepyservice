@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -243,13 +244,27 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		p.reverseProxy.ServeHTTP(w, r)
 
 	case StateWaking:
-		// Show waiting page
-		p.serveWaitingPage(w, r)
+		// Check if this is an API request (non-browser)
+		if p.isAPIRequest(r) {
+			// Hold the request and wait for wake-up
+			p.waitAndProxy(w, r)
+		} else {
+			// Show waiting page for browser
+			p.serveWaitingPage(w, r)
+		}
 
 	case StateSleeping:
 		// Trigger wake
 		go p.triggerWake()
-		p.serveWaitingPage(w, r)
+
+		// Check if this is an API request (non-browser)
+		if p.isAPIRequest(r) {
+			// Hold the request and wait for wake-up
+			p.waitAndProxy(w, r)
+		} else {
+			// Show waiting page for browser
+			p.serveWaitingPage(w, r)
+		}
 	}
 }
 
@@ -561,6 +576,61 @@ func (p *Proxy) hibernate() {
 	p.mu.Unlock()
 
 	p.updateStatus(StateSleeping, "Service is hibernated", 0)
+}
+
+// isAPIRequest determines if the request is from an API client (not a browser)
+func (p *Proxy) isAPIRequest(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	// If Accept header contains text/html, it's likely a browser
+	// Otherwise, treat it as an API request
+	return accept != "" && !strings.Contains(accept, "text/html")
+}
+
+// waitAndProxy holds the request open and waits for the service to wake up,
+// then proxies the request to the backend
+func (p *Proxy) waitAndProxy(w http.ResponseWriter, r *http.Request) {
+	// Create a channel to wait for wake-up completion
+	wakeCh := make(chan bool, 1)
+
+	// Start a goroutine to poll the state
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeout := time.After(p.config.WakeTimeout)
+
+		for {
+			select {
+			case <-timeout:
+				wakeCh <- false
+				return
+			case <-ticker.C:
+				p.mu.RLock()
+				state := p.state
+				p.mu.RUnlock()
+
+				if state == StateAwake {
+					wakeCh <- true
+					return
+				}
+			}
+		}
+	}()
+
+	// Wait for wake-up or timeout
+	success := <-wakeCh
+
+	if !success {
+		// Timeout - return 504 Gateway Timeout
+		http.Error(w, "Service wake-up timeout", http.StatusGatewayTimeout)
+		return
+	}
+
+	// Service is awake, proxy the request
+	p.mu.Lock()
+	p.lastActivity = time.Now()
+	p.mu.Unlock()
+	p.reverseProxy.ServeHTTP(w, r)
 }
 
 func (p *Proxy) idleMonitor() {
