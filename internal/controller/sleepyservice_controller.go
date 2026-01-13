@@ -87,12 +87,22 @@ func (r *SleepyServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if result, shouldReturn := r.checkIdleTimeout(ctx, &hs); shouldReturn {
-		return result, nil
-	}
+	log.Info("State after reconcileState", "state", hs.Status.State, "desiredState", hs.Status.DesiredState)
 
 	if err := r.Status().Update(ctx, &hs); err != nil {
+		log.Error(err, "Failed to update status")
 		return ctrl.Result{}, err
+	}
+
+	// Requeue quickly when waking to poll for component readiness
+	// This must come before checkIdleTimeout so it takes priority
+	if hs.Status.State == sleepyv1alpha1.StateWaking {
+		log.Info("Requeuing for component readiness check", "state", hs.Status.State)
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+
+	if result, shouldReturn := r.checkIdleTimeout(ctx, &hs); shouldReturn {
+		return result, nil
 	}
 
 	return ctrl.Result{}, nil

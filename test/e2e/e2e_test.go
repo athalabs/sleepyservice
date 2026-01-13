@@ -66,6 +66,10 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
+		By("deleting all SleepyService instances before undeploying controller")
+		cmd = exec.Command("kubectl", "delete", "sleepyservice", "--all", "-n", "default", "--timeout=60s")
+		_, _ = utils.Run(cmd)
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
@@ -404,7 +408,7 @@ spec:
 
 			By("sending a request through the proxy to trigger wake-up")
 			// Create a test pod to curl the proxy service
-			curlPodName := "curl-wakeup-test"
+			curlPodName := fmt.Sprintf("curl-wakeup-test-%d", time.Now().Unix())
 			cmd = exec.Command("kubectl", "run", curlPodName,
 				"--image=curlimages/curl:latest",
 				"--restart=Never",
