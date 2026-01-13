@@ -187,7 +187,7 @@ jobs:
           name: sbom
 
       - name: Build Kubernetes installer manifest
-        run: make build-installer
+        run: make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.version }}
 
       - name: Determine if pre-release
         id: prerelease
