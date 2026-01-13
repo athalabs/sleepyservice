@@ -14,7 +14,8 @@ A Kubernetes operator that automatically hibernates (scales to zero) workloads w
 SleepyService creates a smart proxy in front of your Kubernetes workloads that:
 - **Hibernates** your deployments, statefulsets, and databases when idle
 - **Wakes them up automatically** when traffic arrives
-- Shows a friendly **waiting page** with real-time progress updates
+  - For interactive traffic, a friendly **waiting page** with real-time progress updates while the underlying infrastructure wakes up
+  - For API traffic, the incoming request is delayed until the backend is ready
 - Supports **automatic idle timeout** for hands-free cost savings
 - Works with **CloudNativePG databases** for full-stack hibernation
 
