@@ -52,6 +52,22 @@ Perfect for:
 
 ### Installation
 
+**Option 1: Install from GitHub Releases (Recommended)**
+
+Download and apply the pre-built installation bundle from the latest release:
+
+```sh
+kubectl apply -f https://github.com/athalabs/sleepyservice/releases/latest/download/install.yaml
+```
+
+Or install a specific version:
+
+```sh
+kubectl apply -f https://github.com/athalabs/sleepyservice/releases/download/v0.1.0/install.yaml
+```
+
+**Option 2: Install from Source**
+
 1. Install the CRDs:
 ```sh
 make install
@@ -62,9 +78,16 @@ make install
 make deploy IMG=<your-registry>/sleepyservice:tag
 ```
 
-Or use the installation bundle:
+**Option 3: Build and Install Locally**
+
+1. Build the installation bundle:
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/sleepyservice/<tag>/dist/install.yaml
+make build-installer IMG=<your-registry>/sleepyservice:tag
+```
+
+2. Apply the generated bundle:
+```sh
+kubectl apply -f dist/install.yaml
 ```
 
 ### Basic Example
@@ -496,15 +519,26 @@ kubectl logs -n sleepyservice-system deployment/sleepyservice-controller-manager
 
 ### YAML Bundle
 
-1. Build the installer:
+The installation bundle (`install.yaml`) contains all required resources:
+- Custom Resource Definitions (CRDs)
+- Operator deployment and RBAC
+- Default configuration
+
+**For End Users:**
+
+Download from GitHub Releases:
 ```sh
-make build-installer IMG=<your-registry>/sleepyservice:tag
+kubectl apply -f https://github.com/athalabs/sleepyservice/releases/latest/download/install.yaml
 ```
 
-2. Distribute the generated `dist/install.yaml`:
+**For Developers/Maintainers:**
+
+Build the installer locally:
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/sleepyservice/<tag>/dist/install.yaml
+make build-installer IMG=ghcr.io/athalabs/sleepyservice:v0.1.0
 ```
+
+This generates `dist/install.yaml` with all manifests bundled together. The `dist/` folder is created during the build process and is not checked into version control.
 
 ### Helm Chart
 
