@@ -47,7 +47,7 @@ Perfect for:
 ### Prerequisites
 - Kubernetes cluster v1.11.3+
 - kubectl v1.11.3+
-- Go 1.23+ (for development)
+- Go 1.25.5+ (for development)
 - Docker 17.03+ (for building images)
 
 ### Installation
