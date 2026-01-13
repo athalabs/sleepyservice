@@ -454,6 +454,51 @@ spec:
 			}
 			Eventually(verifyRequestSucceeds, time.Minute).Should(Succeed())
 
+			By("waiting for the service to hibernate again (10s idle + 5s buffer)")
+			time.Sleep(15 * time.Second)
+
+			By("verifying the app has hibernated again")
+			Eventually(verifyHibernated, 30*time.Second).Should(Succeed())
+
+			By("testing interactive mode with browser-like request")
+			cmd = exec.Command("kubectl", "exec", curlPodName, "-n", "default", "--",
+				"curl", "-s", "-H", "Accept: text/html",
+				"http://test-hibernating-webapp/status/200")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the waiting page HTML is returned")
+			Expect(output).To(ContainSubstring("<!DOCTYPE html>"), "Should return HTML waiting page")
+			Expect(output).To(ContainSubstring("Waking up"), "Should contain waking message")
+			Expect(output).To(ContainSubstring("test-webapp"), "Should show service name")
+			Expect(output).To(ContainSubstring("/_wake/events"), "Should include SSE endpoint")
+			Expect(output).To(ContainSubstring("EventSource"), "Should have SSE client code")
+
+			By("verifying SSE events endpoint streams state updates")
+			cmd = exec.Command("kubectl", "exec", curlPodName, "-n", "default", "--",
+				"timeout", "30", "curl", "-s", "-N", "-H", "Accept: text/event-stream",
+				"http://test-hibernating-webapp/_wake/events")
+			sseOutput, err := utils.Run(cmd)
+			// Note: timeout command will return non-zero when it times out after 30s, which is expected
+			_ = err
+
+			By("verifying SSE events contain state and progress updates")
+			Expect(sseOutput).To(ContainSubstring("data:"), "Should contain SSE data events")
+			Expect(sseOutput).To(MatchRegexp(`"state":\s*"(sleeping|waking|awake)"`), "Should contain state field")
+			Expect(sseOutput).To(ContainSubstring(`"message"`), "Should contain message field")
+			Expect(sseOutput).To(ContainSubstring(`"progress"`), "Should contain progress field")
+
+			By("waiting for the app to wake up after the interactive request")
+			Eventually(verifyWokenUp, 3*time.Minute).Should(Succeed())
+
+			By("verifying status endpoint returns correct JSON state")
+			cmd = exec.Command("kubectl", "exec", curlPodName, "-n", "default", "--",
+				"curl", "-s", "http://test-hibernating-webapp/_wake/status")
+			statusOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusOutput).To(ContainSubstring(`"state":"awake"`), "Status should show awake state")
+			Expect(statusOutput).To(ContainSubstring(`"progress":100`), "Progress should be 100")
+
 			By("cleaning up test resources")
 			cmd = exec.Command("kubectl", "delete", "pod", curlPodName, "-n", "default", "--force", "--grace-period=0")
 			_, _ = utils.Run(cmd)
