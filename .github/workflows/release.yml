@@ -1,0 +1,250 @@
+name: Release
+
+# Trigger on version tags (v0.0.1, v1.2.3, v1.0.0-beta.1, etc.)
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Required permissions for publishing images, creating releases, and security scanning
+permissions:
+  contents: write        # Create GitHub releases
+  packages: write        # Push to ghcr.io
+  security-events: write # Upload Trivy SARIF to Security tab
+  id-token: write        # OIDC token for provenance attestation
+  attestations: write    # Attach SBOM and provenance attestations
+
+# Cancel in-progress workflow runs when a new tag is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Job 1: Run tests and linting before building/publishing
+  validate:
+    name: Validate Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests
+        run: |
+          go mod tidy
+          make test
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.8.0
+
+  # Job 2: Build multi-platform image, scan for vulnerabilities, and publish to ghcr.io
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # For v1.2.3 -> 1.2.3, 1.2, 1, latest
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # For stable releases only (not pre-releases)
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=sleepyservice
+            org.opencontainers.image.description=Kubernetes operator for auto-hibernating workloads
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Set up QEMU for multi-platform builds
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Enable build cache to speed up subsequent builds
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-platform image
+        id: build-push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Enable build cache using GitHub Actions cache
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Enable provenance attestation (SLSA)
+          provenance: true
+          # Enable SBOM generation
+          sbom: true
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-spdx.json
+
+      - name: Scan image for vulnerabilities with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          # Scan both OS packages and application dependencies
+          scanners: vuln,secret,config
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: container-scan
+
+      - name: Check for HIGH/CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
+          format: table
+          exit-code: 1
+          severity: HIGH,CRITICAL
+          scanners: vuln
+
+      - name: Attest SBOM to image
+        uses: actions/attest-sbom@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build-push.outputs.digest }}
+          sbom-path: sbom-spdx.json
+          push-to-registry: true
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-spdx.json
+          retention-days: 90
+
+  # Job 3: Create GitHub release with artifacts
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+
+      - name: Build Kubernetes installer manifest
+        run: make build-installer
+
+      - name: Determine if pre-release
+        id: prerelease
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ "$TAG" =~ (alpha|beta|rc) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generate release notes from commits since last tag
+          generate_release_notes: true
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          files: |
+            sbom-spdx.json
+            dist/install.yaml
+          body: |
+            ## Docker Images
+
+            Multi-platform images (linux/amd64, linux/arm64) published to GitHub Container Registry:
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.build-and-push.outputs.version }}
+            ```
+
+            ### Available Tags
+            ```
+            ${{ needs.build-and-push.outputs.tags }}
+            ```
+
+            ## Installation
+
+            Install SleepyService to your Kubernetes cluster:
+
+            ```bash
+            kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
+            ```
+
+            ## Verification
+
+            Verify the image signature and SBOM:
+            ```bash
+            gh attestation verify oci://ghcr.io/${{ github.repository }}:${{ needs.build-and-push.outputs.version }} --owner ${{ github.repository_owner }}
+            ```
+
+            ## Security
+
+            - **SBOM**: Software Bill of Materials attached (SPDX format)
+            - **Provenance**: Build provenance attestation included (SLSA)
+            - **Vulnerability Scan**: Trivy scan results available in Security tab
+            - **Image Digest**: `${{ needs.build-and-push.outputs.version }}`
+
+            ## Assets
+
+            - `install.yaml` - Complete Kubernetes installation manifest
+            - `sbom-spdx.json` - Software Bill of Materials (SPDX format)
