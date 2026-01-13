@@ -1,5 +1,12 @@
 # SleepyService
 
+[![Tests](https://github.com/athalabs/sleepyservice/actions/workflows/test.yml/badge.svg)](https://github.com/athalabs/sleepyservice/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/athalabs/sleepyservice/branch/main/graph/badge.svg)](https://codecov.io/gh/athalabs/sleepyservice)
+[![Go Report Card](https://goreportcard.com/badge/github.com/athalabs/sleepyservice)](https://goreportcard.com/report/github.com/athalabs/sleepyservice)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/athalabs/sleepyservice)](https://github.com/athalabs/sleepyservice/blob/main/go.mod)
+[![License](https://img.shields.io/github/license/athalabs/sleepyservice)](https://github.com/athalabs/sleepyservice/blob/main/LICENSE)
+[![Release](https://img.shields.io/github/v/release/athalabs/sleepyservice)](https://github.com/athalabs/sleepyservice/releases/latest)
+
 A Kubernetes operator that automatically hibernates (scales to zero) workloads when they're not in use and wakes them up on-demand when traffic arrives. Save resources and reduce costs for development, staging, and low-traffic environments.
 
 ## Overview
@@ -416,6 +423,12 @@ make run
 
 # Run tests
 make test
+
+# Run tests with coverage summary
+make test-coverage
+
+# Generate HTML coverage report
+make test-coverage-html
 
 # Build binary
 make build

@@ -61,6 +61,18 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+.PHONY: test-coverage
+test-coverage: test ## Run tests and generate coverage report.
+	@echo "Coverage report:"
+	@go tool cover -func=cover.out | tail -1
+	@echo ""
+	@echo "To view detailed HTML coverage report, run: make test-coverage-html"
+
+.PHONY: test-coverage-html
+test-coverage-html: test ## Generate HTML coverage report.
+	go tool cover -html=cover.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
