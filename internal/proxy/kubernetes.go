@@ -28,7 +28,7 @@ var sleepyServiceGVR = schema.GroupVersionResource{
 
 // K8sClient wraps Kubernetes API interactions
 type K8sClient struct {
-	clientset     *kubernetes.Clientset
+	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
 }
 
