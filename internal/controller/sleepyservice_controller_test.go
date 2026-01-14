@@ -200,7 +200,7 @@ var _ = Describe("SleepyService Controller", func() {
 
 			By("Validating proxy service configuration")
 			Expect(proxyService.Spec.Ports).To(HaveLen(1))
-			Expect(proxyService.Spec.Ports[0].Port).To(Equal(int32(80)))
+			Expect(proxyService.Spec.Ports[0].Port).To(Equal(int32(8000)))
 			Expect(proxyService.Spec.Ports[0].TargetPort.IntVal).To(Equal(int32(8080)))
 		})
 

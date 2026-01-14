@@ -685,7 +685,7 @@ func (r *SleepyServiceReconciler) ensureProxyService(ctx context.Context, hs *sl
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "http",
-					Port:       80,
+					Port:       r.getBackendServicePort(hs),
 					TargetPort: intstr.FromInt(8080),
 				},
 			},
