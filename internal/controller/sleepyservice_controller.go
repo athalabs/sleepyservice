@@ -31,6 +31,18 @@ const (
 	finalizerName = "sleepy.atha.gr/finalizer"
 )
 
+// dependencyGraph represents the dependency relationships between components
+type dependencyGraph struct {
+	// dependencies maps each component name to the list of components it depends on
+	dependencies map[string][]string
+	// dependents maps each component name to the list of components that depend on it
+	dependents map[string][]string
+	// components is the set of all component names
+	components map[string]bool
+	// componentsByName maps name to the full Component for reference
+	componentsByName map[string]sleepyv1alpha1.Component
+}
+
 // SleepyServiceReconciler reconciles a SleepyService object
 type SleepyServiceReconciler struct {
 	client.Client
@@ -210,6 +222,10 @@ func (r *SleepyServiceReconciler) reconcileState(ctx context.Context, hs *sleepy
 		// Proxy wants awake, but we're sleeping - start wake-up
 		log.Info("Starting wake-up sequence", "desiredState", desiredState, "currentState", currentState)
 		if err := r.scaleUpComponents(ctx, hs); err != nil {
+			// Check if this is a dependency validation error
+			log.Error(err, "Failed to scale up components")
+			// For now, return the error which will be retried
+			// In the future, could set State = StateError for permanent failures
 			return err
 		}
 		hs.Status.State = sleepyv1alpha1.StateWaking
@@ -217,7 +233,14 @@ func (r *SleepyServiceReconciler) reconcileState(ctx context.Context, hs *sleepy
 		hs.Status.LastTransition = &now
 
 	case currentState == sleepyv1alpha1.StateWaking:
-		// Currently waking - check if all components are ready
+		// Currently waking - continue scaling with dependencies
+		// This ensures we progress through dependency levels on each reconcile
+		if err := r.scaleUpComponents(ctx, hs); err != nil {
+			log.Error(err, "Failed to scale up components during waking")
+			return err
+		}
+
+		// Check if all components are ready
 		allReady := true
 		for _, comp := range hs.Status.Components {
 			if !comp.Ready {
@@ -247,8 +270,206 @@ func (r *SleepyServiceReconciler) reconcileState(ctx context.Context, hs *sleepy
 	return nil
 }
 
+// buildDependencyGraph creates a dependency graph from the components list
+func (r *SleepyServiceReconciler) buildDependencyGraph(components []sleepyv1alpha1.Component) (*dependencyGraph, error) {
+	graph := &dependencyGraph{
+		dependencies:     make(map[string][]string),
+		dependents:       make(map[string][]string),
+		components:       make(map[string]bool),
+		componentsByName: make(map[string]sleepyv1alpha1.Component),
+	}
+
+	// First pass: register all component names
+	for _, comp := range components {
+		if graph.components[comp.Name] {
+			return nil, fmt.Errorf("duplicate component name: %s", comp.Name)
+		}
+		graph.components[comp.Name] = true
+		graph.componentsByName[comp.Name] = comp
+		graph.dependencies[comp.Name] = []string{}
+		graph.dependents[comp.Name] = []string{}
+	}
+
+	// Second pass: build dependency edges
+	for _, comp := range components {
+		for _, dep := range comp.DependsOn {
+			// Validate dependency exists
+			if !graph.components[dep] {
+				return nil, fmt.Errorf("component '%s' depends on '%s' which does not exist", comp.Name, dep)
+			}
+			// Add forward edge (comp depends on dep)
+			graph.dependencies[comp.Name] = append(graph.dependencies[comp.Name], dep)
+			// Add reverse edge (dep is depended on by comp)
+			graph.dependents[dep] = append(graph.dependents[dep], comp.Name)
+		}
+	}
+
+	// Validate no circular dependencies
+	if err := graph.validateDependencies(); err != nil {
+		return nil, err
+	}
+
+	return graph, nil
+}
+
+// validateDependencies checks for circular dependencies using DFS
+func (g *dependencyGraph) validateDependencies() error {
+	visited := make(map[string]bool)
+	recStack := make(map[string]bool)
+	path := []string{}
+
+	var dfs func(node string) error
+	dfs = func(node string) error {
+		visited[node] = true
+		recStack[node] = true
+		path = append(path, node)
+
+		for _, dep := range g.dependencies[node] {
+			if !visited[dep] {
+				if err := dfs(dep); err != nil {
+					return err
+				}
+			} else if recStack[dep] {
+				// Found a cycle - build cycle path for error message
+				cycleStart := -1
+				for i, comp := range path {
+					if comp == dep {
+						cycleStart = i
+						break
+					}
+				}
+				if cycleStart >= 0 {
+					cyclePath := append(path[cycleStart:], dep)
+					return fmt.Errorf("circular dependency detected: %v", cyclePath)
+				}
+				return fmt.Errorf("circular dependency detected involving: %s", dep)
+			}
+		}
+
+		recStack[node] = false
+		path = path[:len(path)-1]
+		return nil
+	}
+
+	for comp := range g.components {
+		if !visited[comp] {
+			if err := dfs(comp); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// computeScalingLevels performs topological sort using Kahn's algorithm
+// Returns components grouped into levels where each level can be scaled in parallel
+func (g *dependencyGraph) computeScalingLevels() [][]string {
+	// Calculate in-degree for each component (number of dependencies)
+	inDegree := make(map[string]int)
+	for comp := range g.components {
+		inDegree[comp] = len(g.dependencies[comp])
+	}
+
+	// Start with components that have no dependencies
+	levels := [][]string{}
+	queue := []string{}
+
+	for comp := range g.components {
+		if inDegree[comp] == 0 {
+			queue = append(queue, comp)
+		}
+	}
+
+	// Process components level by level
+	for len(queue) > 0 {
+		// Current level is all components in the queue
+		currentLevel := make([]string, len(queue))
+		copy(currentLevel, queue)
+		levels = append(levels, currentLevel)
+
+		// Clear queue for next level
+		queue = []string{}
+
+		// For each component in current level, reduce in-degree of its dependents
+		for _, comp := range currentLevel {
+			for _, dependent := range g.dependents[comp] {
+				inDegree[dependent]--
+				if inDegree[dependent] == 0 {
+					queue = append(queue, dependent)
+				}
+			}
+		}
+	}
+
+	return levels
+}
+
+// areComponentsReady checks if all specified components are ready
+func (r *SleepyServiceReconciler) areComponentsReady(hs *sleepyv1alpha1.SleepyService, componentNames []string) bool {
+	// Build a map of component statuses for quick lookup
+	statusMap := make(map[string]sleepyv1alpha1.ComponentStatus)
+	for _, status := range hs.Status.Components {
+		statusMap[status.Name] = status
+	}
+
+	// Check if all components are ready
+	for _, name := range componentNames {
+		status, exists := statusMap[name]
+		if !exists || !status.Ready {
+			return false
+		}
+	}
+
+	return true
+}
+
+// scaleUpComponents scales up components in dependency order
 func (r *SleepyServiceReconciler) scaleUpComponents(ctx context.Context, hs *sleepyv1alpha1.SleepyService) error {
-	for _, comp := range hs.Spec.Components {
+	log := log.FromContext(ctx)
+
+	// Build and validate dependency graph
+	graph, err := r.buildDependencyGraph(hs.Spec.Components)
+	if err != nil {
+		return fmt.Errorf("failed to build dependency graph: %w", err)
+	}
+
+	// Compute scaling levels using topological sort
+	levels := graph.computeScalingLevels()
+	log.Info("Computed scaling levels", "numLevels", len(levels), "levels", levels)
+
+	// Determine which level we should be working on
+	// We can scale level N if all components in levels 0..N-1 are ready
+	currentLevel := -1
+	for i := range levels {
+		if i == 0 {
+			// Always can work on level 0
+			currentLevel = 0
+		} else {
+			// Check if previous level is ready
+			prevLevelComponents := levels[i-1]
+			if r.areComponentsReady(hs, prevLevelComponents) {
+				currentLevel = i
+			} else {
+				// Previous level not ready, wait
+				log.Info("Waiting for previous level to be ready", "level", i-1, "components", prevLevelComponents)
+				break
+			}
+		}
+	}
+
+	if currentLevel == -1 {
+		// No level to scale (shouldn't happen, but handle gracefully)
+		return nil
+	}
+
+	// Scale components in the current level
+	componentsToScale := levels[currentLevel]
+	log.Info("Scaling level", "level", currentLevel, "components", componentsToScale)
+
+	for _, compName := range componentsToScale {
+		comp := graph.componentsByName[compName]
+
 		ns := comp.Ref.Namespace
 		if ns == "" {
 			ns = hs.Namespace
@@ -907,6 +1128,13 @@ func (r *SleepyServiceReconciler) updateComponentStatuses(ctx context.Context, h
 	statuses := make([]sleepyv1alpha1.ComponentStatus, 0, len(hs.Spec.Components))
 	allReady := true
 
+	// Build dependency graph for status messaging
+	graph, graphErr := r.buildDependencyGraph(hs.Spec.Components)
+	var levels [][]string
+	if graphErr == nil {
+		levels = graph.computeScalingLevels()
+	}
+
 	for _, comp := range hs.Spec.Components {
 		status := sleepyv1alpha1.ComponentStatus{Name: comp.Name}
 
@@ -941,6 +1169,40 @@ func (r *SleepyServiceReconciler) updateComponentStatuses(ctx context.Context, h
 			} else {
 				status.Ready = ready
 				status.Message = msg
+			}
+		}
+
+		// Add dependency-aware messaging when not ready
+		if !status.Ready && graphErr == nil && len(comp.DependsOn) > 0 {
+			// Build status map for dependency lookup
+			statusMap := make(map[string]sleepyv1alpha1.ComponentStatus)
+			for _, s := range statuses {
+				statusMap[s.Name] = s
+			}
+
+			// Check if any dependencies are not ready
+			notReadyDeps := []string{}
+			for _, dep := range comp.DependsOn {
+				if depStatus, exists := statusMap[dep]; exists && !depStatus.Ready {
+					notReadyDeps = append(notReadyDeps, dep)
+				}
+			}
+
+			// Update message if waiting on dependencies
+			if len(notReadyDeps) > 0 {
+				status.Message = fmt.Sprintf("Waiting for dependencies: %v. Current: %s", notReadyDeps, status.Message)
+			}
+		}
+
+		// Add level information during waking state
+		if hs.Status.State == sleepyv1alpha1.StateWaking && graphErr == nil {
+			for levelIdx, levelComponents := range levels {
+				for _, compName := range levelComponents {
+					if compName == comp.Name {
+						status.Message = fmt.Sprintf("[Level %d/%d] %s", levelIdx, len(levels)-1, status.Message)
+						break
+					}
+				}
 			}
 		}
 

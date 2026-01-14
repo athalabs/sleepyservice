@@ -1292,6 +1292,157 @@ var _ = Describe("SleepyService Controller", func() {
 			})
 		})
 
+		Context("Dependency-aware scaling", func() {
+			It("should build dependency graph correctly for linear dependencies", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "db", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "api", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"db"}},
+					{Name: "frontend", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"api"}},
+				}
+
+				graph, err := reconciler.buildDependencyGraph(components)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(graph).NotTo(BeNil())
+
+				// Verify dependencies
+				Expect(graph.dependencies["db"]).To(BeEmpty())
+				Expect(graph.dependencies["api"]).To(Equal([]string{"db"}))
+				Expect(graph.dependencies["frontend"]).To(Equal([]string{"api"}))
+
+				// Verify dependents
+				Expect(graph.dependents["db"]).To(Equal([]string{"api"}))
+				Expect(graph.dependents["api"]).To(Equal([]string{"frontend"}))
+				Expect(graph.dependents["frontend"]).To(BeEmpty())
+			})
+
+			It("should compute correct scaling levels for diamond dependencies", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "db", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "cache", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "api", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"db", "cache"}},
+					{Name: "worker", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"db", "cache"}},
+					{Name: "frontend", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"api"}},
+				}
+
+				graph, err := reconciler.buildDependencyGraph(components)
+				Expect(err).NotTo(HaveOccurred())
+
+				levels := graph.computeScalingLevels()
+				Expect(levels).To(HaveLen(3))
+
+				// Level 0: db and cache (no dependencies)
+				Expect(levels[0]).To(ConsistOf("db", "cache"))
+
+				// Level 1: api and worker (depend on db and cache)
+				Expect(levels[1]).To(ConsistOf("api", "worker"))
+
+				// Level 2: frontend (depends on api)
+				Expect(levels[2]).To(ConsistOf("frontend"))
+			})
+
+			It("should detect circular dependencies", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "a", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"b"}},
+					{Name: "b", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"c"}},
+					{Name: "c", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"a"}},
+				}
+
+				_, err := reconciler.buildDependencyGraph(components)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("circular dependency"))
+			})
+
+			It("should detect missing dependencies", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "api", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"db"}},
+				}
+
+				_, err := reconciler.buildDependencyGraph(components)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("does not exist"))
+				Expect(err.Error()).To(ContainSubstring("db"))
+			})
+
+			It("should detect duplicate component names", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "api", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "api", Type: sleepyv1alpha1.ComponentTypeDeployment},
+				}
+
+				_, err := reconciler.buildDependencyGraph(components)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("duplicate component name"))
+			})
+
+			It("should handle components with no dependencies", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "a", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "b", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "c", Type: sleepyv1alpha1.ComponentTypeDeployment},
+				}
+
+				graph, err := reconciler.buildDependencyGraph(components)
+				Expect(err).NotTo(HaveOccurred())
+
+				levels := graph.computeScalingLevels()
+				Expect(levels).To(HaveLen(1))
+				Expect(levels[0]).To(ConsistOf("a", "b", "c"))
+			})
+
+			It("should correctly check if components are ready", func() {
+				sleepyService := &sleepyv1alpha1.SleepyService{
+					Status: sleepyv1alpha1.SleepyServiceStatus{
+						Components: []sleepyv1alpha1.ComponentStatus{
+							{Name: "db", Ready: true, Message: "1/1 ready"},
+							{Name: "api", Ready: false, Message: "0/1 ready"},
+							{Name: "frontend", Ready: true, Message: "1/1 ready"},
+						},
+					},
+				}
+
+				// db is ready
+				Expect(reconciler.areComponentsReady(sleepyService, []string{"db"})).To(BeTrue())
+
+				// db and frontend are ready
+				Expect(reconciler.areComponentsReady(sleepyService, []string{"db", "frontend"})).To(BeTrue())
+
+				// api is not ready
+				Expect(reconciler.areComponentsReady(sleepyService, []string{"api"})).To(BeFalse())
+
+				// Mix of ready and not ready
+				Expect(reconciler.areComponentsReady(sleepyService, []string{"db", "api"})).To(BeFalse())
+
+				// Non-existent component
+				Expect(reconciler.areComponentsReady(sleepyService, []string{"nonexistent"})).To(BeFalse())
+			})
+
+			It("should compute correct levels for complex multi-level dependencies", func() {
+				components := []sleepyv1alpha1.Component{
+					{Name: "postgres", Type: sleepyv1alpha1.ComponentTypeCNPGCluster},
+					{Name: "redis", Type: sleepyv1alpha1.ComponentTypeDeployment},
+					{Name: "api", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"postgres", "redis"}},
+					{Name: "worker", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"postgres", "redis"}},
+					{Name: "frontend", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"api"}},
+					{Name: "admin", Type: sleepyv1alpha1.ComponentTypeDeployment, DependsOn: []string{"api", "worker"}},
+				}
+
+				graph, err := reconciler.buildDependencyGraph(components)
+				Expect(err).NotTo(HaveOccurred())
+
+				levels := graph.computeScalingLevels()
+				Expect(levels).To(HaveLen(3))
+
+				// Level 0: postgres and redis
+				Expect(levels[0]).To(ConsistOf("postgres", "redis"))
+
+				// Level 1: api and worker
+				Expect(levels[1]).To(ConsistOf("api", "worker"))
+
+				// Level 2: frontend and admin
+				Expect(levels[2]).To(ConsistOf("frontend", "admin"))
+			})
+		})
+
 		Context("Component readiness checks", func() {
 			// Note: Component readiness tests are marked as Pending due to envtest status subresource limitations.
 			// The readiness check logic is tested via E2E tests and during normal reconciliation.
