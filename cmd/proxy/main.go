@@ -141,8 +141,6 @@ func main() {
 	mux.HandleFunc("/", p.handleRequest)
 	mux.HandleFunc("/_wake/status", p.handleStatus)
 	mux.HandleFunc("/_wake/events", p.handleSSE)
-	mux.HandleFunc("/_wake/trigger", p.handleTriggerWake)
-	mux.HandleFunc("/_wake/hibernate", p.handleHibernate)
 	mux.HandleFunc("/_wake/health", p.handleHealth)
 
 	server := &http.Server{
@@ -344,30 +342,6 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-}
-
-func (p *Proxy) handleTriggerWake(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	go p.triggerWake()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "wake triggered"})
-}
-
-func (p *Proxy) handleHibernate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	go p.hibernate()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "hibernate triggered"})
 }
 
 func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {

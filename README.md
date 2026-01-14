@@ -399,14 +399,11 @@ The automatically created wake proxy provides:
 - **Waiting Page**: Beautiful UI with real-time progress updates via Server-Sent Events
 - **Health Monitoring**: Continuously checks backend health after wake-up
 - **Idle Detection**: Tracks traffic and triggers auto-hibernation
-- **Manual Controls**: HTTP API for manual wake/hibernate operations
 
 ### Proxy Endpoints
 
 - `/_wake/status` - JSON status of current state
 - `/_wake/events` - SSE stream for real-time updates
-- `/_wake/trigger` - POST to manually trigger wake-up
-- `/_wake/hibernate` - POST to manually hibernate
 - `/_wake/health` - Proxy health check
 
 All other paths are proxied to your backend application.
