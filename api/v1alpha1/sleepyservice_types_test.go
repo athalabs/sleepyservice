@@ -187,6 +187,62 @@ func createTestSleepyServiceList() *SleepyServiceList {
 // Phase 2: DeepCopy Tests
 // =============================================================================
 
+// Helper functions for TestBackendServiceSpec_DeepCopy validation
+
+func validateBackendServiceFieldsCopied(t *testing.T, src, copy *BackendServiceSpec) {
+	t.Helper()
+	if *copy.Enabled != *src.Enabled {
+		t.Error("Enabled field not copied correctly")
+	}
+	if copy.Type != src.Type {
+		t.Error("Type field not copied correctly")
+	}
+	if copy.ClusterIP != src.ClusterIP {
+		t.Error("ClusterIP not copied correctly")
+	}
+}
+
+func validateBackendServicePointerIndependence(t *testing.T, src, copy *BackendServiceSpec) {
+	t.Helper()
+	if copy.Enabled == src.Enabled {
+		t.Error("Enabled pointer should be independent")
+	}
+}
+
+func validateBackendServiceSliceIndependence(t *testing.T, src, copy *BackendServiceSpec) {
+	t.Helper()
+	if len(copy.ExternalIPs) > 0 && &copy.ExternalIPs[0] == &src.ExternalIPs[0] {
+		t.Error("ExternalIPs slice shares backing array")
+	}
+}
+
+func validateBackendServiceMapIndependence(t *testing.T, src, copy *BackendServiceSpec) {
+	t.Helper()
+	if len(copy.Annotations) > 0 && &copy.Annotations == &src.Annotations {
+		t.Error("Annotations map should be independent")
+	}
+}
+
+func validateBackendServiceNotNil(t *testing.T, copy *BackendServiceSpec) {
+	t.Helper()
+	if copy == nil {
+		t.Error("DeepCopy should not return nil for non-nil source")
+	}
+}
+
+func validateBackendServiceNilFields(t *testing.T, copy *BackendServiceSpec) {
+	t.Helper()
+	if copy.Enabled != nil {
+		t.Error("Nil Enabled pointer should remain nil")
+	}
+	if copy.Ports != nil {
+		t.Error("Nil Ports should remain nil")
+	}
+	if copy.Annotations != nil {
+		t.Error("Nil Annotations should remain nil")
+	}
+}
+
 func TestBackendServiceSpec_DeepCopy(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -197,51 +253,24 @@ func TestBackendServiceSpec_DeepCopy(t *testing.T) {
 			name:   "full spec with all fields",
 			source: createTestBackendServiceSpec(),
 			validate: func(t *testing.T, src, copy *BackendServiceSpec) {
-				if *copy.Enabled != *src.Enabled {
-					t.Error("Enabled field not copied correctly")
-				}
-				if copy.Type != src.Type {
-					t.Error("Type field not copied correctly")
-				}
-				if copy.ClusterIP != src.ClusterIP {
-					t.Error("ClusterIP not copied correctly")
-				}
-				// Verify pointer independence
-				if copy.Enabled == src.Enabled {
-					t.Error("Enabled pointer should be independent")
-				}
-				// Verify slice independence
-				if len(copy.ExternalIPs) > 0 && &copy.ExternalIPs[0] == &src.ExternalIPs[0] {
-					t.Error("ExternalIPs slice shares backing array")
-				}
-				// Verify map independence
-				if len(copy.Annotations) > 0 && &copy.Annotations == &src.Annotations {
-					t.Error("Annotations map should be independent")
-				}
+				validateBackendServiceFieldsCopied(t, src, copy)
+				validateBackendServicePointerIndependence(t, src, copy)
+				validateBackendServiceSliceIndependence(t, src, copy)
+				validateBackendServiceMapIndependence(t, src, copy)
 			},
 		},
 		{
 			name:   "empty spec",
 			source: &BackendServiceSpec{},
 			validate: func(t *testing.T, src, copy *BackendServiceSpec) {
-				if copy == nil {
-					t.Error("DeepCopy should not return nil for non-nil source")
-				}
+				validateBackendServiceNotNil(t, copy)
 			},
 		},
 		{
 			name:   "nil pointer fields",
 			source: &BackendServiceSpec{Enabled: nil, Ports: nil, Annotations: nil},
 			validate: func(t *testing.T, src, copy *BackendServiceSpec) {
-				if copy.Enabled != nil {
-					t.Error("Nil Enabled pointer should remain nil")
-				}
-				if copy.Ports != nil {
-					t.Error("Nil Ports should remain nil")
-				}
-				if copy.Annotations != nil {
-					t.Error("Nil Annotations should remain nil")
-				}
+				validateBackendServiceNilFields(t, copy)
 			},
 		},
 	}
