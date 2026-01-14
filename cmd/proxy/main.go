@@ -26,10 +26,10 @@ type Config struct {
 	Namespace         string
 	SleepyServiceName string // Name of the SleepyService resource
 	DeploymentName    string
-	CNPGClusterName   string // Optional - if empty, no CNPG handling
-	BackendURL        string
+	CNPGClusterName   string  // Optional - if empty, no CNPG handling
+	BackendHost       string  // Backend service host (without port)
+	BackendPorts      []int32 // List of backend ports to proxy
 	HealthPath        string
-	ListenAddr        string
 	DesiredReplicas   int32
 	WakeTimeout       time.Duration
 	IdleTimeout       time.Duration // 0 = disabled
@@ -73,10 +73,10 @@ type WakeStatus struct {
 
 // Proxy is the main application struct
 type Proxy struct {
-	config       Config
-	k8s          *proxy.K8sClient
-	reverseProxy *httputil.ReverseProxy
-	templates    *template.Template
+	config         Config
+	k8s            *proxy.K8sClient
+	reverseProxies map[int32]*httputil.ReverseProxy // Multiple reverse proxies by port
+	templates      *template.Template
 
 	mu           sync.RWMutex
 	state        State
@@ -104,28 +104,14 @@ func main() {
 		log.Fatalf("Failed to create Kubernetes client: %v", err)
 	}
 
-	// Create reverse proxy
-	backendURL, err := url.Parse(config.BackendURL)
-	if err != nil {
-		log.Fatalf("Invalid backend URL: %v", err)
-	}
-
 	p := &Proxy{
-		config:       config,
-		k8s:          k8s,
-		reverseProxy: httputil.NewSingleHostReverseProxy(backendURL),
-		templates:    tmpl,
-		state:        StateSleeping,
-		lastActivity: time.Now(),
-		sseClients:   make(map[chan WakeStatus]struct{}),
-	}
-
-	// Configure reverse proxy error handler
-	p.reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("Proxy error: %v", err)
-		// If backend fails, we might have gone to sleep
-		p.checkAndUpdateState()
-		http.Error(w, "Backend unavailable", http.StatusBadGateway)
+		config:         config,
+		k8s:            k8s,
+		templates:      tmpl,
+		state:          StateSleeping,
+		lastActivity:   time.Now(),
+		sseClients:     make(map[chan WakeStatus]struct{}),
+		reverseProxies: make(map[int32]*httputil.ReverseProxy),
 	}
 
 	// Check initial state
@@ -136,33 +122,59 @@ func main() {
 		go p.idleMonitor()
 	}
 
-	// Setup HTTP routes
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", p.handleRequest)
-	mux.HandleFunc("/_wake/status", p.handleStatus)
-	mux.HandleFunc("/_wake/events", p.handleSSE)
-	mux.HandleFunc("/_wake/health", p.handleHealth)
+	servers := make([]*http.Server, 0, len(config.BackendPorts))
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	server := &http.Server{
-		Addr:         config.ListenAddr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+	// Multi-port mode
+	log.Printf("Starting wake proxy in multi-port mode")
+	log.Printf("Backend host: %s", config.BackendHost)
+	log.Printf("Backend ports: %v", config.BackendPorts)
+	log.Printf("Health path: %s", config.HealthPath)
+
+	for _, port := range config.BackendPorts {
+		// Create reverse proxy for this port
+		backendURL := fmt.Sprintf("http://%s:%d", config.BackendHost, port)
+		parsedURL, err := url.Parse(backendURL)
+		if err != nil {
+			log.Fatalf("Invalid backend URL for port %d: %v", port, err)
+		}
+
+		rp := httputil.NewSingleHostReverseProxy(parsedURL)
+		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("Proxy error on port %d: %v", port, err)
+			p.checkAndUpdateState()
+			http.Error(w, "Backend unavailable", http.StatusBadGateway)
+		}
+		p.reverseProxies[port] = rp
+
+		// Create server for this port
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", p.makePortHandler(port))
+		mux.HandleFunc("/_wake/status", p.handleStatus)
+		mux.HandleFunc("/_wake/events", p.handleSSE)
+		mux.HandleFunc("/_wake/health", p.handleHealth)
+
+		server := &http.Server{
+			Addr:    fmt.Sprintf(":%d", port),
+			Handler: mux,
+			// ReadTimeout covers reading the request
+			ReadTimeout: 30 * time.Second,
+			// WriteTimeout must be longer than WakeTimeout to allow requests
+			// to be held open during wake-up without timing out
+			WriteTimeout: config.WakeTimeout + 30*time.Second,
+		}
+		servers = append(servers, server)
+
+		// Start server in goroutine
+		go func(s *http.Server, p int32) {
+			log.Printf("Listening on :%d -> %s", p, backendURL)
+			if err := s.ListenAndServe(); err != http.ErrServerClosed {
+				log.Fatalf("Server error on port %d: %v", p, err)
+			}
+		}(server, port)
 	}
 
-	// Graceful shutdown
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
-	}()
-
-	log.Printf("Wake proxy starting on %s", config.ListenAddr)
-	log.Printf("Backend: %s", config.BackendURL)
 	log.Printf("Deployment: %s/%s", config.Namespace, config.DeploymentName)
 	if config.CNPGClusterName != "" {
 		log.Printf("CNPG Cluster: %s/%s", config.Namespace, config.CNPGClusterName)
@@ -171,8 +183,15 @@ func main() {
 		log.Printf("Idle timeout: %s", config.IdleTimeout)
 	}
 
-	if err := server.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatalf("Server error: %v", err)
+	// Wait for shutdown signal
+	<-sigCh
+	log.Println("Shutting down...")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown all servers
+	for _, server := range servers {
+		_ = server.Shutdown(ctx)
 	}
 }
 
@@ -182,16 +201,35 @@ func loadConfig() Config {
 		SleepyServiceName: getEnv("HIBERNATING_SERVICE_NAME", ""),
 		DeploymentName:    getEnv("DEPLOYMENT_NAME", ""),
 		CNPGClusterName:   getEnv("CNPG_CLUSTER_NAME", ""),
-		BackendURL:        getEnv("BACKEND_URL", "http://localhost:8055"),
+		BackendHost:       getEnv("BACKEND_HOST", ""),
 		HealthPath:        getEnv("HEALTH_PATH", "/server/health"),
-		ListenAddr:        getEnv("LISTEN_ADDR", ":8080"),
 		DesiredReplicas:   int32(getEnvInt("DESIRED_REPLICAS", 1)),
 		WakeTimeout:       getEnvDuration("WAKE_TIMEOUT", 5*time.Minute),
 		IdleTimeout:       getEnvDuration("IDLE_TIMEOUT", 0),
 	}
 
+	// Parse BACKEND_PORTS (comma-separated list like "8055,8056,9000")
+	portsStr := getEnv("BACKEND_PORTS", "")
+	if portsStr == "" {
+		log.Fatal("BACKEND_PORTS environment variable is required")
+	}
+
+	portStrs := strings.Split(portsStr, ",")
+	for _, portStr := range portStrs {
+		portStr = strings.TrimSpace(portStr)
+		if port, err := strconv.ParseInt(portStr, 10, 32); err == nil {
+			config.BackendPorts = append(config.BackendPorts, int32(port))
+		} else {
+			log.Fatalf("Invalid port in BACKEND_PORTS: %s", portStr)
+		}
+	}
+
 	if config.SleepyServiceName == "" {
 		log.Fatal("HIBERNATING_SERVICE_NAME environment variable is required")
+	}
+
+	if config.BackendHost == "" {
+		log.Fatal("BACKEND_HOST environment variable is required")
 	}
 
 	return config
@@ -222,46 +260,49 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	return defaultValue
 }
 
-// handleRequest is the main request handler
-func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
-	// Skip wake endpoints
-	if len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/_wake" {
-		return
-	}
-
-	p.mu.RLock()
-	state := p.state
-	p.mu.RUnlock()
-
-	switch state {
-	case StateAwake:
-		// Update last activity and proxy
-		p.mu.Lock()
-		p.lastActivity = time.Now()
-		p.mu.Unlock()
-		p.reverseProxy.ServeHTTP(w, r)
-
-	case StateWaking:
-		// Check if this is an API request (non-browser)
-		if p.isAPIRequest(r) {
-			// Hold the request and wait for wake-up
-			p.waitAndProxy(w, r)
-		} else {
-			// Show waiting page for browser
-			p.serveWaitingPage(w, r)
+// makePortHandler creates a request handler for a specific port
+func (p *Proxy) makePortHandler(port int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Skip wake endpoints
+		if len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/_wake" {
+			return
 		}
 
-	case StateSleeping:
-		// Trigger wake
-		go p.triggerWake()
+		p.mu.RLock()
+		state := p.state
+		rp := p.reverseProxies[port]
+		p.mu.RUnlock()
 
-		// Check if this is an API request (non-browser)
-		if p.isAPIRequest(r) {
-			// Hold the request and wait for wake-up
-			p.waitAndProxy(w, r)
-		} else {
-			// Show waiting page for browser
-			p.serveWaitingPage(w, r)
+		switch state {
+		case StateAwake:
+			// Update last activity and proxy
+			p.mu.Lock()
+			p.lastActivity = time.Now()
+			p.mu.Unlock()
+			rp.ServeHTTP(w, r)
+
+		case StateWaking:
+			// Check if this is an API request (non-browser)
+			if p.isAPIRequest(r) {
+				// Hold the request and wait for wake-up
+				p.waitAndProxyToPort(w, r, port)
+			} else {
+				// Show waiting page for browser
+				p.serveWaitingPage(w, r)
+			}
+
+		case StateSleeping:
+			// Trigger wake
+			go p.triggerWake()
+
+			// Check if this is an API request (non-browser)
+			if p.isAPIRequest(r) {
+				// Hold the request and wait for wake-up
+				p.waitAndProxyToPort(w, r, port)
+			} else {
+				// Show waiting page for browser
+				p.serveWaitingPage(w, r)
+			}
 		}
 	}
 }
@@ -472,8 +513,10 @@ func (p *Proxy) triggerWake() {
 	// Step 3: Health check
 	p.updateStatus(StateWaking, "Verifying application health...", 90)
 
-	backendURL := p.config.BackendURL + p.config.HealthPath
-	if err := p.waitForHealthy(ctx, backendURL); err != nil {
+	// Use first port for health check
+	firstPort := p.config.BackendPorts[0]
+	healthCheckURL := fmt.Sprintf("http://%s:%d%s", p.config.BackendHost, firstPort, p.config.HealthPath)
+	if err := p.waitForHealthy(ctx, healthCheckURL); err != nil {
 		log.Printf("Health check failed: %v", err)
 		p.updateStatus(StateSleeping, fmt.Sprintf("Health check failed: %v", err), 0)
 		return
@@ -496,6 +539,8 @@ func (p *Proxy) onWakeProgress(message string, progress int) {
 func (p *Proxy) waitForHealthy(ctx context.Context, url string) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 
+	log.Printf("Starting health check at %s", url)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -504,11 +549,15 @@ func (p *Proxy) waitForHealthy(ctx context.Context, url string) error {
 		}
 
 		resp, err := client.Get(url)
-		if err == nil {
+		if err != nil {
+			log.Printf("Health check error: %v", err)
+		} else {
 			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				log.Printf("Health check succeeded with status %d", resp.StatusCode)
 				return nil
 			}
+			log.Printf("Health check returned non-2xx status: %d", resp.StatusCode)
 		}
 
 		time.Sleep(2 * time.Second)
@@ -560,9 +609,9 @@ func (p *Proxy) isAPIRequest(r *http.Request) bool {
 	return accept != "" && !strings.Contains(accept, "text/html")
 }
 
-// waitAndProxy holds the request open and waits for the service to wake up,
-// then proxies the request to the backend
-func (p *Proxy) waitAndProxy(w http.ResponseWriter, r *http.Request) {
+// waitAndProxyToPort holds the request open and waits for the service to wake up,
+// then proxies the request to the backend on a specific port (multi-port mode)
+func (p *Proxy) waitAndProxyToPort(w http.ResponseWriter, r *http.Request, port int32) {
 	// Create a channel to wait for wake-up completion
 	wakeCh := make(chan bool, 1)
 
@@ -603,8 +652,9 @@ func (p *Proxy) waitAndProxy(w http.ResponseWriter, r *http.Request) {
 	// Service is awake, proxy the request
 	p.mu.Lock()
 	p.lastActivity = time.Now()
+	rp := p.reverseProxies[port]
 	p.mu.Unlock()
-	p.reverseProxy.ServeHTTP(w, r)
+	rp.ServeHTTP(w, r)
 }
 
 func (p *Proxy) idleMonitor() {

@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -480,16 +481,12 @@ func (r *SleepyServiceReconciler) ensureProxyDeployment(ctx context.Context, hs 
 					ServiceAccountName: proxyName,
 					Containers: []corev1.Container{
 						{
-							Name:    "proxy",
-							Image:   r.OperatorImage,
-							Command: []string{"/proxy"},
-							Ports: []corev1.ContainerPort{
-								{
-									Name:          "http",
-									ContainerPort: 8080,
-								},
-							},
-							Env: r.buildProxyEnv(hs),
+							Name:            "proxy",
+							Image:           r.OperatorImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"/proxy"},
+							Ports:           r.buildProxyContainerPorts(hs),
+							Env:             r.buildProxyEnv(hs),
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -628,27 +625,34 @@ func (r *SleepyServiceReconciler) buildProxyEnv(hs *sleepyv1alpha1.SleepyService
 	}
 
 	if appComponent != nil {
-		ns := appComponent.Ref.Namespace
-		if ns == "" {
-			ns = hs.Namespace
-		}
-
-		// Construct backend URL
-		var backendURL string
+		// Determine backend service name
+		var backendSvcName string
 		if hs.Spec.BackendService != nil {
 			// New API: use managed backend service
-			backendSvcName := fmt.Sprintf("%s-actual", hs.Name)
-			port := r.getBackendServicePort(hs)
-			backendURL = fmt.Sprintf("http://%s.%s:%d", backendSvcName, hs.Namespace, port)
+			backendSvcName = fmt.Sprintf("%s-actual", hs.Name)
 		} else {
 			// Old API: use deployment name as service name
-			port := r.getBackendServicePort(hs)
-			backendURL = fmt.Sprintf("http://%s.%s:%d", appComponent.Ref.Name, ns, port)
+			backendSvcName = appComponent.Ref.Name
+		}
+
+		// Build backend host (FQDN without port)
+		backendHost := fmt.Sprintf("%s.%s", backendSvcName, hs.Namespace)
+
+		// Build backend ports list for multi-port support
+		var backendPorts []string
+		if hs.Spec.BackendService != nil && len(hs.Spec.BackendService.Ports) > 0 {
+			for _, p := range hs.Spec.BackendService.Ports {
+				backendPorts = append(backendPorts, fmt.Sprintf("%d", p.Port))
+			}
+		} else {
+			// Default to port 80
+			backendPorts = []string{"80"}
 		}
 
 		env = append(env,
 			corev1.EnvVar{Name: "DEPLOYMENT_NAME", Value: appComponent.Ref.Name},
-			corev1.EnvVar{Name: "BACKEND_URL", Value: backendURL},
+			corev1.EnvVar{Name: "BACKEND_HOST", Value: backendHost},
+			corev1.EnvVar{Name: "BACKEND_PORTS", Value: strings.Join(backendPorts, ",")},
 		)
 		if appComponent.Replicas != nil {
 			env = append(env, corev1.EnvVar{Name: "DESIRED_REPLICAS", Value: fmt.Sprintf("%d", *appComponent.Replicas)})
@@ -682,13 +686,7 @@ func (r *SleepyServiceReconciler) ensureProxyService(ctx context.Context, hs *sl
 				"app.kubernetes.io/name":     "wake-proxy",
 				"app.kubernetes.io/instance": hs.Name,
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "http",
-					Port:       r.getBackendServicePort(hs),
-					TargetPort: intstr.FromInt(8080),
-				},
-			},
+			Ports: r.buildProxyServicePorts(hs),
 		}
 
 		return nil
@@ -884,13 +882,59 @@ func (r *SleepyServiceReconciler) buildBackendServicePorts(hs *sleepyv1alpha1.Sl
 	}
 }
 
-func (r *SleepyServiceReconciler) getBackendServicePort(hs *sleepyv1alpha1.SleepyService) int32 {
-	// New API: use BackendService.Ports
+func (r *SleepyServiceReconciler) buildProxyContainerPorts(hs *sleepyv1alpha1.SleepyService) []corev1.ContainerPort {
+	// If user specified ports explicitly, expose all of them on the proxy container
 	if hs.Spec.BackendService != nil && len(hs.Spec.BackendService.Ports) > 0 {
-		return hs.Spec.BackendService.Ports[0].Port
+		ports := make([]corev1.ContainerPort, len(hs.Spec.BackendService.Ports))
+		for i, p := range hs.Spec.BackendService.Ports {
+			ports[i] = corev1.ContainerPort{
+				Name:          p.Name,
+				ContainerPort: p.Port,
+			}
+		}
+		return ports
 	}
-	// Default
-	return 80
+
+	// Default to port 80 if nothing specified
+	return []corev1.ContainerPort{
+		{
+			Name:          "http",
+			ContainerPort: 80,
+		},
+	}
+}
+
+func (r *SleepyServiceReconciler) buildProxyServicePorts(hs *sleepyv1alpha1.SleepyService) []corev1.ServicePort {
+	// If user specified ports explicitly, expose all of them on the proxy
+	if hs.Spec.BackendService != nil && len(hs.Spec.BackendService.Ports) > 0 {
+		ports := make([]corev1.ServicePort, len(hs.Spec.BackendService.Ports))
+		for i, p := range hs.Spec.BackendService.Ports {
+			// Proxy service exposes the same port and forwards to the same port on the proxy container
+			// This allows the proxy to know which backend port to forward to based on which port it receives on
+			protocol := corev1.ProtocolTCP
+			if p.Protocol != "" {
+				protocol = p.Protocol
+			}
+
+			ports[i] = corev1.ServicePort{
+				Name:       p.Name,
+				Protocol:   protocol,
+				Port:       p.Port,
+				TargetPort: intstr.FromInt32(p.Port),
+			}
+		}
+		return ports
+	}
+
+	// Default to port 80 if nothing specified
+	return []corev1.ServicePort{
+		{
+			Name:       "http",
+			Protocol:   corev1.ProtocolTCP,
+			Port:       80,
+			TargetPort: intstr.FromInt32(80),
+		},
+	}
 }
 
 func (r *SleepyServiceReconciler) getHealthPath(hs *sleepyv1alpha1.SleepyService) string {
