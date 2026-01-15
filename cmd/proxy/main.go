@@ -32,6 +32,7 @@ type Config struct {
 	DesiredReplicas   int32
 	WakeTimeout       time.Duration
 	IdleTimeout       time.Duration // 0 = disabled
+	DebugEndpoints    bool
 }
 
 // State represents the current state of the backend
@@ -152,6 +153,10 @@ func main() {
 		mux.HandleFunc("/_wake/status", p.handleStatus)
 		mux.HandleFunc("/_wake/events", p.handleSSE)
 		mux.HandleFunc("/_wake/health", p.handleHealth)
+		if config.DebugEndpoints {
+			mux.HandleFunc("/_wake/debug/wake", p.handleWake)
+			mux.HandleFunc("/_wake/debug/sleep", p.handleSleep)
+		}
 
 		server := &http.Server{
 			Addr:    fmt.Sprintf(":%d", port),
@@ -203,6 +208,7 @@ func loadConfig() Config {
 		DesiredReplicas:   int32(getEnvInt("DESIRED_REPLICAS", 1)),
 		WakeTimeout:       getEnvDuration("WAKE_TIMEOUT", 5*time.Minute),
 		IdleTimeout:       getEnvDuration("IDLE_TIMEOUT", 0),
+		DebugEndpoints:    getEnvBool("DEBUG_ENDPOINTS", false),
 	}
 
 	// Parse BACKEND_PORTS (comma-separated list like "8055,8056,9000")
@@ -230,31 +236,6 @@ func loadConfig() Config {
 	}
 
 	return config
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if i, err := strconv.Atoi(value); err == nil {
-			return i
-		}
-	}
-	return defaultValue
-}
-
-func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if d, err := time.ParseDuration(value); err == nil {
-			return d
-		}
-	}
-	return defaultValue
 }
 
 // makePortHandler creates a request handler for a specific port
@@ -388,6 +369,30 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"healthy": true,
 		"state":   p.state.String(),
 	})
+}
+
+func (p *Proxy) handleWake(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	go p.triggerWake()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "wake triggered"})
+}
+
+func (p *Proxy) handleSleep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	go p.hibernate()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "hibernate triggered"})
 }
 
 // broadcastStatus sends status updates to all SSE clients
@@ -632,4 +637,38 @@ func (p *Proxy) idleMonitor() {
 			p.hibernate()
 		}
 	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if b, err := strconv.ParseBool(value); err == nil {
+			return b
+		}
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if i, err := strconv.Atoi(value); err == nil {
+			return i
+		}
+	}
+	return defaultValue
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			return d
+		}
+	}
+	return defaultValue
 }
