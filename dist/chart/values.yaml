@@ -44,6 +44,9 @@ controllerManager:
 rbac:
   enable: true
 
+rbacHelprs:
+  enable: false
+
 # [CRDs]: To enable the CRDs
 crd:
   # This option determines whether the CRDs are included
