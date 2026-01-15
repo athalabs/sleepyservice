@@ -186,6 +186,12 @@ jobs:
         with:
           name: sbom
 
+      - name: Install kubebuilder
+        run: |
+          curl -L -o kubebuilder "https://go.kubebuilder.io/dl/latest/$(go env GOOS)/$(go env GOARCH)"
+          chmod +x kubebuilder
+          sudo mv kubebuilder /usr/local/bin/
+
       - name: Build Kubernetes installer manifest
         run: make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.version }}
 
@@ -272,6 +278,12 @@ jobs:
         uses: azure/setup-helm@v4
         with:
           version: 'latest'
+
+      - name: Install kubebuilder
+        run: |
+          curl -L -o kubebuilder "https://go.kubebuilder.io/dl/latest/$(go env GOOS)/$(go env GOARCH)"
+          chmod +x kubebuilder
+          sudo mv kubebuilder /usr/local/bin/
 
       - name: Extract version from tag
         id: version
