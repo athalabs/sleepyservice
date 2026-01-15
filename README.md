@@ -6,6 +6,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/athalabs/sleepyservice)](https://github.com/athalabs/sleepyservice/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/athalabs/sleepyservice)](https://github.com/athalabs/sleepyservice/blob/main/LICENSE)
 [![Release](https://img.shields.io/github/v/release/athalabs/sleepyservice)](https://github.com/athalabs/sleepyservice/releases/latest)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/sleepyservice)](https://artifacthub.io/packages/helm/sleepyservice/sleepyservice)
 
 A Kubernetes operator that automatically hibernates (scales to zero) workloads when they're not in use and wakes them up on-demand when traffic arrives. Save resources and reduce costs for development, staging, and low-traffic environments.
 
@@ -62,7 +63,29 @@ Perfect for:
 
 ### Installation
 
-**Option 1: Install from GitHub Releases (Recommended)**
+**Option 1: Install with Helm (Recommended)**
+
+Install from the OCI registry:
+
+```sh
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice
+```
+
+Or install a specific version:
+
+```sh
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice --version 0.1.0
+```
+
+Customize the installation with values:
+
+```sh
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice \
+  --set controllerManager.replicas=2 \
+  --set controllerManager.container.resources.limits.cpu=1000m
+```
+
+**Option 2: Install from GitHub Releases**
 
 Download and apply the pre-built installation bundle from the latest release:
 
@@ -76,7 +99,7 @@ Or install a specific version:
 kubectl apply -f https://github.com/athalabs/sleepyservice/releases/download/vMAJOR.MINOR.PATCH/install.yaml
 ```
 
-**Option 2: Install from Source**
+**Option 3: Install from Source**
 
 1. Install the CRDs:
 ```sh
@@ -88,7 +111,7 @@ make install
 make deploy IMG=<your-registry>/sleepyservice:tag
 ```
 
-**Option 3: Build and Install Locally**
+**Option 4: Build and Install Locally**
 
 1. Build the installation bundle:
 ```sh
@@ -546,12 +569,70 @@ This generates `dist/install.yaml` with all manifests bundled together. The `dis
 
 ### Helm Chart
 
-1. Generate Helm chart:
+**For End Users:**
+
+The Helm chart is published to GitHub Container Registry as an OCI artifact:
+
 ```sh
-kubebuilder edit --plugins=helm/v1-alpha
+# Install latest version
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice
+
+# Install specific version
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice --version 0.1.0
+
+# Install in a specific namespace
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice \
+  --namespace sleepyservice-system \
+  --create-namespace
+
+# Customize values
+helm install sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice \
+  --set controllerManager.replicas=2 \
+  --set metrics.enable=true \
+  --set prometheus.enable=true
+
+# Upgrade an existing installation
+helm upgrade sleepyservice oci://ghcr.io/athalabs/charts/sleepyservice --version 0.2.0
+
+# Uninstall
+helm uninstall sleepyservice
 ```
 
-2. Chart is available in `dist/chart/`
+**Available Configuration Options:**
+
+See [dist/chart/values.yaml](./dist/chart/values.yaml) for all configurable values, including:
+- `controllerManager.replicas` - Number of controller manager replicas (default: 1)
+- `controllerManager.container.image.repository` - Image repository
+- `controllerManager.container.image.tag` - Image tag
+- `controllerManager.container.resources` - CPU and memory limits/requests
+- `rbac.enable` - Enable RBAC (default: true)
+- `crd.enable` - Install CRDs (default: true)
+- `crd.keep` - Keep CRDs on uninstall (default: true)
+- `metrics.enable` - Enable metrics export (default: true)
+- `prometheus.enable` - Enable Prometheus ServiceMonitor (default: false)
+
+**For Developers/Chart Publishers:**
+
+Generate and publish the Helm chart:
+
+```sh
+# Regenerate chart from kustomize manifests
+kubebuilder edit --plugins=helm/v2-alpha
+
+# Chart is available in dist/chart/
+
+# Test the chart locally
+helm lint dist/chart
+helm template test dist/chart
+
+# Package the chart
+helm package dist/chart
+
+# Push to OCI registry (requires authentication)
+helm push sleepyservice-0.1.0.tgz oci://ghcr.io/athalabs/charts
+```
+
+The Helm chart is automatically published to the OCI registry on every GitHub release via CI/CD.
 
 ## Contributing
 
