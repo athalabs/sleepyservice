@@ -15,10 +15,6 @@ type SleepyServiceSpec struct {
 	// +optional
 	BackendService *BackendServiceSpec `json:"backendService,omitempty"`
 
-	// HealthPath for readiness checks on the backend
-	// +kubebuilder:default:="/health"
-	HealthPath string `json:"healthPath,omitempty"`
-
 	// WakeTimeout is how long to wait for the stack to wake
 	// +kubebuilder:default:="5m"
 	WakeTimeout metav1.Duration `json:"wakeTimeout,omitempty"`

@@ -50,6 +50,8 @@ Perfect for:
 4. **When Awake**: Traffic is proxied transparently to your application
 5. **Auto-Sleep**: After configured idle time, components hibernate automatically
 
+> **Note**: SleepyService trusts Kubernetes readiness probes. Ensure your pods have appropriate readiness probes configured. The proxy will forward traffic as soon as Kubernetes reports pods as ready.
+
 ## Quick Start
 
 ### Prerequisites
@@ -71,7 +73,7 @@ kubectl apply -f https://github.com/athalabs/sleepyservice/releases/latest/downl
 Or install a specific version:
 
 ```sh
-kubectl apply -f https://github.com/athalabs/sleepyservice/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/athalabs/sleepyservice/releases/download/vMAJOR.MINOR.PATCH/install.yaml
 ```
 
 **Option 2: Install from Source**
@@ -115,9 +117,6 @@ spec:
   # Wait up to 5 minutes for wake-up
   wakeTimeout: 5m
 
-  # Health check path for readiness verification
-  healthPath: /health
-
   # Backend service configuration
   backendService:
     enabled: true
@@ -158,7 +157,6 @@ Access your app through the proxy service, and it will automatically wake up whe
 |-------|------|----------|---------|-------------|
 | `components` | []Component | Yes | - | Components to manage, in dependency order |
 | `backendService` | BackendServiceSpec | No | - | Configuration for the managed backend Service |
-| `healthPath` | string | No | `/health` | Health check path for readiness verification |
 | `wakeTimeout` | Duration | No | `5m` | Maximum time to wait for wake-up |
 | `idleTimeout` | Duration | No | `0` (disabled) | Auto-hibernate after this period of inactivity |
 
@@ -226,7 +224,6 @@ metadata:
   name: demo-app
 spec:
   idleTimeout: 30m
-  healthPath: /
 
   components:
     - name: web
@@ -246,7 +243,6 @@ metadata:
 spec:
   idleTimeout: 1h
   wakeTimeout: 10m
-  healthPath: /api/health
 
   backendService:
     type: ClusterIP
@@ -296,7 +292,6 @@ metadata:
   name: stateful-app
 spec:
   idleTimeout: 2h
-  healthPath: /health
 
   components:
     - name: app
@@ -397,7 +392,7 @@ Kubernetes StatefulSet with persistent volumes. Scaled to 0 when sleeping, maint
 The automatically created wake proxy provides:
 
 - **Waiting Page**: Beautiful UI with real-time progress updates via Server-Sent Events
-- **Health Monitoring**: Continuously checks backend health after wake-up
+- **Readiness Aware**: Relies on Kubernetes readiness probes to determine when services are ready
 - **Idle Detection**: Tracks traffic and triggers auto-hibernation
 
 ### Proxy Endpoints
@@ -474,9 +469,8 @@ make undeploy
 4. **Controller** scales components in dependency order
 5. **Controller** updates `SleepyService.status.state` to `Waking`
 6. **Proxy** polls status and updates waiting page in real-time
-7. **Controller** detects all components ready, sets state to `Awake`
-8. **Proxy** performs health check on backend
-9. **Proxy** starts forwarding traffic
+7. **Controller** detects all components ready via K8s readiness probes, sets state to `Awake`
+8. **Proxy** starts forwarding traffic
 
 ### Resource Ownership
 
@@ -518,7 +512,6 @@ kubectl logs -n sleepyservice-system deployment/sleepyservice-controller-manager
 
 **Wake proxy shows error**
 - Check backend service configuration
-- Verify health check path is correct
 - Ensure target deployments have correct labels
 
 **Auto-hibernation not working**
