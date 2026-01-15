@@ -11,6 +11,11 @@ import (
 
 // SleepyServiceSpec defines the desired state of SleepyService.
 type SleepyServiceSpec struct {
+	// Debug enabled /_wake/debug/wake and /_wake/debug/sleep endpoints
+	// +optional
+	// +kubebuilder:default:=false
+	Debug *bool `json:"debug,omitempty"`
+
 	// BackendService configuration for the managed backend Service
 	// +optional
 	BackendService *BackendServiceSpec `json:"backendService,omitempty"`

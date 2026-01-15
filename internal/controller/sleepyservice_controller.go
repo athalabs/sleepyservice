@@ -844,6 +844,10 @@ func (r *SleepyServiceReconciler) buildProxyEnv(hs *sleepyv1alpha1.SleepyService
 		{Name: "IDLE_TIMEOUT", Value: hs.Spec.IdleTimeout.Duration.String()},
 	}
 
+	if hs.Spec.Debug != nil && *hs.Spec.Debug {
+		env = append(env, corev1.EnvVar{Name: "DEBUG_ENDPOINTS", Value: "true"})
+	}
+
 	if appComponent != nil {
 		// Determine backend service name
 		var backendSvcName string

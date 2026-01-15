@@ -178,6 +178,7 @@ Access your app through the proxy service, and it will automatically wake up whe
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `debug` | bool | No | `false` | Enable debug endpoints `/ _wake/debug/wake` and `/ _wake/debug/sleep` |
 | `components` | []Component | Yes | - | Components to manage, in dependency order |
 | `backendService` | BackendServiceSpec | No | - | Configuration for the managed backend Service |
 | `wakeTimeout` | Duration | No | `5m` | Maximum time to wait for wake-up |
@@ -423,6 +424,8 @@ The automatically created wake proxy provides:
 - `/_wake/status` - JSON status of current state
 - `/_wake/events` - SSE stream for real-time updates
 - `/_wake/health` - Proxy health check
+- (POST) `/_wake/debug/wake` - (if debug: true) trigger wake-up manually
+- (POST) `/_wake/debug/sleep` - (if debug: true) trigger sleep manually
 
 All other paths are proxied to your backend application.
 
