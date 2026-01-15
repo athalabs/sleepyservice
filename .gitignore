@@ -13,6 +13,7 @@ dist/*
 dist/chart/*
 !dist/chart/Chart.yaml
 !dist/chart/values.yaml
+!dist/chart/README.md
 !dist/chart/templates/
 dist/chart/templates/*
 !dist/chart/templates/_helpers.tpl
