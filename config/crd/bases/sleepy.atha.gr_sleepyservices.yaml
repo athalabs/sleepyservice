@@ -167,10 +167,6 @@ spec:
                   type: object
                 minItems: 1
                 type: array
-              healthPath:
-                default: /health
-                description: HealthPath for readiness checks on the backend
-                type: string
               idleTimeout:
                 default: "0"
                 description: IdleTimeout triggers auto-hibernate after no activity

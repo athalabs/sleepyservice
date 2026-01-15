@@ -29,7 +29,6 @@ type Config struct {
 	CNPGClusterName   string  // Optional - if empty, no CNPG handling
 	BackendHost       string  // Backend service host (without port)
 	BackendPorts      []int32 // List of backend ports to proxy
-	HealthPath        string
 	DesiredReplicas   int32
 	WakeTimeout       time.Duration
 	IdleTimeout       time.Duration // 0 = disabled
@@ -130,7 +129,6 @@ func main() {
 	log.Printf("Starting wake proxy in multi-port mode")
 	log.Printf("Backend host: %s", config.BackendHost)
 	log.Printf("Backend ports: %v", config.BackendPorts)
-	log.Printf("Health path: %s", config.HealthPath)
 
 	for _, port := range config.BackendPorts {
 		// Create reverse proxy for this port
@@ -202,7 +200,6 @@ func loadConfig() Config {
 		DeploymentName:    getEnv("DEPLOYMENT_NAME", ""),
 		CNPGClusterName:   getEnv("CNPG_CLUSTER_NAME", ""),
 		BackendHost:       getEnv("BACKEND_HOST", ""),
-		HealthPath:        getEnv("HEALTH_PATH", "/server/health"),
 		DesiredReplicas:   int32(getEnvInt("DESIRED_REPLICAS", 1)),
 		WakeTimeout:       getEnvDuration("WAKE_TIMEOUT", 5*time.Minute),
 		IdleTimeout:       getEnvDuration("IDLE_TIMEOUT", 0),
@@ -510,17 +507,8 @@ func (p *Proxy) triggerWake() {
 		return
 	}
 
-	// Step 3: Health check
-	p.updateStatus(StateWaking, "Verifying application health...", 90)
-
-	// Use first port for health check
-	firstPort := p.config.BackendPorts[0]
-	healthCheckURL := fmt.Sprintf("http://%s:%d%s", p.config.BackendHost, firstPort, p.config.HealthPath)
-	if err := p.waitForHealthy(ctx, healthCheckURL); err != nil {
-		log.Printf("Health check failed: %v", err)
-		p.updateStatus(StateSleeping, fmt.Sprintf("Health check failed: %v", err), 0)
-		return
-	}
+	// Kubernetes readiness indicates the service is ready
+	p.updateStatus(StateWaking, "Service is ready!", 95)
 
 	p.mu.Lock()
 	p.state = StateAwake
@@ -531,37 +519,9 @@ func (p *Proxy) triggerWake() {
 }
 
 func (p *Proxy) onWakeProgress(message string, progress int) {
-	// Map wake progress (0-100) to our range (10-85)
-	mappedProgress := 10 + (progress * 75 / 100)
+	// Map wake progress (0-100) to our range (10-95)
+	mappedProgress := 10 + (progress * 85 / 100)
 	p.updateStatus(StateWaking, message, mappedProgress)
-}
-
-func (p *Proxy) waitForHealthy(ctx context.Context, url string) error {
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	log.Printf("Starting health check at %s", url)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		resp, err := client.Get(url)
-		if err != nil {
-			log.Printf("Health check error: %v", err)
-		} else {
-			_ = resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				log.Printf("Health check succeeded with status %d", resp.StatusCode)
-				return nil
-			}
-			log.Printf("Health check returned non-2xx status: %d", resp.StatusCode)
-		}
-
-		time.Sleep(2 * time.Second)
-	}
 }
 
 func (p *Proxy) hibernate() {

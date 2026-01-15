@@ -24,7 +24,6 @@ const (
 // createTestSleepyServiceSpec creates a fully populated SleepyServiceSpec for testing
 func createTestSleepyServiceSpec() *SleepyServiceSpec {
 	return &SleepyServiceSpec{
-		HealthPath:  "/health",
 		WakeTimeout: metav1.Duration{Duration: 5 * time.Minute},
 		IdleTimeout: metav1.Duration{Duration: 10 * time.Minute},
 		BackendService: &BackendServiceSpec{
@@ -177,7 +176,7 @@ func createTestSleepyServiceList() *SleepyServiceList {
 			*createTestSleepyService(),
 			{
 				ObjectMeta: metav1.ObjectMeta{Name: "service-2", Namespace: "default"},
-				Spec:       SleepyServiceSpec{HealthPath: "/status", Components: []Component{{Name: "api"}}},
+				Spec:       SleepyServiceSpec{Components: []Component{{Name: "api"}}},
 			},
 		},
 	}
@@ -432,9 +431,6 @@ func TestSleepyServiceSpec_DeepCopy(t *testing.T) {
 			name:   "full spec",
 			source: createTestSleepyServiceSpec(),
 			validate: func(t *testing.T, src, copy *SleepyServiceSpec) {
-				if copy.HealthPath != src.HealthPath {
-					t.Error("HealthPath not copied")
-				}
 				if copy.BackendService == src.BackendService {
 					t.Error("BackendService pointer not deep copied")
 				}
@@ -455,7 +451,6 @@ func TestSleepyServiceSpec_DeepCopy(t *testing.T) {
 		{
 			name: "nil backend service",
 			source: &SleepyServiceSpec{
-				HealthPath:     "/health",
 				BackendService: nil,
 				Components:     []Component{{Name: "app"}},
 			},
@@ -705,9 +700,6 @@ func TestSleepyServiceSpec_DeepCopyInto(t *testing.T) {
 
 	source.DeepCopyInto(dest)
 
-	if dest.HealthPath != source.HealthPath {
-		t.Error("HealthPath not copied")
-	}
 	if dest.BackendService == source.BackendService {
 		t.Error("BackendService pointer should be independent")
 	}
@@ -930,7 +922,6 @@ func TestMutationIndependence_SleepyService(t *testing.T) {
 	// Mutate the copy
 	copy.Name = "modified-name"
 	copy.Labels["app"] = testModifiedValue
-	copy.Spec.HealthPath = "/modified"
 	if copy.Spec.BackendService != nil {
 		*copy.Spec.BackendService.Enabled = false
 	}
@@ -944,9 +935,6 @@ func TestMutationIndependence_SleepyService(t *testing.T) {
 	}
 	if original.Labels["app"] != "sleepy" {
 		t.Error("Mutation in copy's labels affected original")
-	}
-	if original.Spec.HealthPath != "/health" {
-		t.Error("Mutation in copy's spec affected original")
 	}
 	if original.Spec.BackendService != nil && *original.Spec.BackendService.Enabled != true {
 		t.Error("Mutation in copy's nested object affected original")
@@ -1349,16 +1337,11 @@ func TestComplexNestedStructures_DeepCopy(t *testing.T) {
 
 func Test_Structs(t *testing.T) {
 	a := &SleepyServiceSpec{
-		HealthPath:     "/health",
 		BackendService: &BackendServiceSpec{},
 	}
 
 	var out SleepyServiceSpec
 	a.DeepCopyInto(&out)
-
-	if out.HealthPath != a.HealthPath {
-		t.Errorf("DeepCopyInto failed for SleepyServiceSpec.HealthPath")
-	}
 
 	b := a.DeepCopy()
 	if b.BackendService == nil {

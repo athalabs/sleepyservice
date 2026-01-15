@@ -91,7 +91,6 @@ var _ = Describe("SleepyService Controller", func() {
 							},
 						},
 					},
-					HealthPath:  "/health",
 					WakeTimeout: metav1.Duration{Duration: 5 * time.Minute},
 					IdleTimeout: metav1.Duration{Duration: 10 * time.Minute},
 					Components: []sleepyv1alpha1.Component{
@@ -182,8 +181,10 @@ var _ = Describe("SleepyService Controller", func() {
 			Expect(envMap["NAMESPACE"]).To(Equal(namespace))
 			Expect(envMap).To(HaveKey("DEPLOYMENT_NAME"))
 			Expect(envMap["DEPLOYMENT_NAME"]).To(Equal(deploymentName))
-			Expect(envMap).To(HaveKey("HEALTH_PATH"))
-			Expect(envMap["HEALTH_PATH"]).To(Equal("/health"))
+			Expect(envMap).To(HaveKey("BACKEND_HOST"))
+			Expect(envMap["BACKEND_HOST"]).To(Equal("test-hibernating-service-actual.default"))
+			Expect(envMap).To(HaveKey("BACKEND_PORTS"))
+			Expect(envMap["BACKEND_PORTS"]).To(Equal("8000"))
 			Expect(envMap).To(HaveKey("DESIRED_REPLICAS"))
 			Expect(envMap["DESIRED_REPLICAS"]).To(Equal("2"))
 
@@ -326,7 +327,6 @@ var _ = Describe("SleepyService Controller", func() {
 							},
 						},
 					},
-					HealthPath:  "/health",
 					WakeTimeout: metav1.Duration{Duration: 5 * time.Minute},
 					Components: []sleepyv1alpha1.Component{
 						{
@@ -497,7 +497,6 @@ var _ = Describe("SleepyService Controller", func() {
 							},
 						},
 					},
-					HealthPath:  "/health",
 					WakeTimeout: metav1.Duration{Duration: 5 * time.Minute},
 					IdleTimeout: metav1.Duration{Duration: 10 * time.Minute},
 					Components: []sleepyv1alpha1.Component{
@@ -642,7 +641,6 @@ var _ = Describe("SleepyService Controller", func() {
 							},
 						},
 					},
-					HealthPath:  "/healthz",
 					WakeTimeout: metav1.Duration{Duration: 3 * time.Minute},
 					IdleTimeout: metav1.Duration{Duration: 15 * time.Minute},
 					Components: []sleepyv1alpha1.Component{
@@ -666,7 +664,6 @@ var _ = Describe("SleepyService Controller", func() {
 			}
 
 			Expect(envMap["NAMESPACE"]).To(Equal("test-ns"))
-			Expect(envMap["HEALTH_PATH"]).To(Equal("/healthz"))
 			Expect(envMap["WAKE_TIMEOUT"]).To(Equal("3m0s"))
 			Expect(envMap["IDLE_TIMEOUT"]).To(Equal("15m0s"))
 			Expect(envMap["DEPLOYMENT_NAME"]).To(Equal("my-app"))
@@ -2161,6 +2158,26 @@ var _ = Describe("SleepyService Controller", func() {
 				_, err := reconciler.findAppComponent(hs)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("no Deployment or StatefulSet component found"))
+			})
+
+			It("should get backend service port from spec", func() {
+				hs := &sleepyv1alpha1.SleepyService{
+					Spec: sleepyv1alpha1.SleepyServiceSpec{
+						BackendService: &sleepyv1alpha1.BackendServiceSpec{
+							Ports: []sleepyv1alpha1.ServicePort{
+								{
+									Port:       8080,
+									TargetPort: intstr.FromInt(8080),
+								},
+							},
+						},
+					},
+				}
+
+				ports := reconciler.buildBackendServicePorts(hs)
+				Expect(ports).To(HaveLen(1))
+				Expect(ports[0].Port).To(Equal(int32(8080)))
+				Expect(ports[0].TargetPort.IntVal).To(Equal(int32(8080)))
 			})
 		})
 	})

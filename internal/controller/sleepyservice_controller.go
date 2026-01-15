@@ -840,7 +840,6 @@ func (r *SleepyServiceReconciler) buildProxyEnv(hs *sleepyv1alpha1.SleepyService
 	env := []corev1.EnvVar{
 		{Name: "NAMESPACE", Value: hs.Namespace},
 		{Name: "HIBERNATING_SERVICE_NAME", Value: hs.Name},
-		{Name: "HEALTH_PATH", Value: r.getHealthPath(hs)},
 		{Name: "WAKE_TIMEOUT", Value: hs.Spec.WakeTimeout.Duration.String()},
 		{Name: "IDLE_TIMEOUT", Value: hs.Spec.IdleTimeout.Duration.String()},
 	}
@@ -1156,15 +1155,6 @@ func (r *SleepyServiceReconciler) buildProxyServicePorts(hs *sleepyv1alpha1.Slee
 			TargetPort: intstr.FromInt32(80),
 		},
 	}
-}
-
-func (r *SleepyServiceReconciler) getHealthPath(hs *sleepyv1alpha1.SleepyService) string {
-	// New API: use top-level HealthPath
-	if hs.Spec.HealthPath != "" {
-		return hs.Spec.HealthPath
-	}
-	// Default
-	return "/health"
 }
 
 //nolint:unparam

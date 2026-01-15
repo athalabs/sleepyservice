@@ -229,7 +229,6 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 80
-  healthPath: /
   wakeTimeout: 5m
   idleTimeout: 10m
   components:
@@ -359,7 +358,6 @@ metadata:
   name: test-hibernating-webapp
   namespace: default
 spec:
-  healthPath: /status/200
   wakeTimeout: 3m
   idleTimeout: 10s
   backendService:
