@@ -5,6 +5,10 @@
 domain: atha.gr
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: dist
 projectName: sleepyservice
 repo: github.com/athalabs/sleepyservice
 resources:

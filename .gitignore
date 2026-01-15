@@ -8,7 +8,14 @@ bin/*
 Dockerfile.cross
 
 # Build Artifacts
-dist/
+dist/*
+!dist/chart/
+dist/chart/*
+!dist/chart/Chart.yaml
+!dist/chart/values.yaml
+!dist/chart/templates/
+dist/chart/templates/*
+!dist/chart/templates/_helpers.tpl
 
 # Test binary, built with `go test -c`
 *.test
