@@ -171,7 +171,7 @@ var _ = Describe("SleepyService Controller", func() {
 			Expect(container.Image).To(Equal(operatorImage))
 			Expect(container.Command).To(Equal([]string{"/proxy"}))
 			Expect(container.Ports).To(HaveLen(1))
-			Expect(container.Ports[0].ContainerPort).To(Equal(int32(8080)))
+			Expect(container.Ports[0].ContainerPort).To(Equal(int32(8000)))
 
 			By("Validating proxy environment variables")
 			envMap := make(map[string]string)
@@ -182,8 +182,6 @@ var _ = Describe("SleepyService Controller", func() {
 			Expect(envMap["NAMESPACE"]).To(Equal(namespace))
 			Expect(envMap).To(HaveKey("DEPLOYMENT_NAME"))
 			Expect(envMap["DEPLOYMENT_NAME"]).To(Equal(deploymentName))
-			Expect(envMap).To(HaveKey("BACKEND_URL"))
-			Expect(envMap["BACKEND_URL"]).To(Equal("http://test-hibernating-service-actual.default:8000"))
 			Expect(envMap).To(HaveKey("HEALTH_PATH"))
 			Expect(envMap["HEALTH_PATH"]).To(Equal("/health"))
 			Expect(envMap).To(HaveKey("DESIRED_REPLICAS"))
@@ -200,8 +198,8 @@ var _ = Describe("SleepyService Controller", func() {
 
 			By("Validating proxy service configuration")
 			Expect(proxyService.Spec.Ports).To(HaveLen(1))
-			Expect(proxyService.Spec.Ports[0].Port).To(Equal(int32(80)))
-			Expect(proxyService.Spec.Ports[0].TargetPort.IntVal).To(Equal(int32(8080)))
+			Expect(proxyService.Spec.Ports[0].Port).To(Equal(int32(8000)))
+			Expect(proxyService.Spec.Ports[0].TargetPort.IntVal).To(Equal(int32(8000)))
 		})
 
 		// Note: This test is marked as Pending due to envtest timing issues with finalizer persistence.
@@ -421,6 +419,203 @@ var _ = Describe("SleepyService Controller", func() {
 		})
 	})
 
+	Context("When reconciling a SleepyService with multiple ports", func() {
+		const (
+			resourceName   = "test-multiport-service"
+			deploymentName = "test-multiport-app"
+			namespace      = "default"
+			operatorImage  = "test-operator:v1.0.0"
+		)
+
+		ctx := context.Background()
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: namespace,
+		}
+
+		BeforeEach(func() {
+			By("Creating a test deployment")
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: namespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": "test-multiport"},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": "test-multiport"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "app",
+									Image: "test:latest",
+									Ports: []corev1.ContainerPort{
+										{ContainerPort: 8055},
+										{ContainerPort: 8056},
+										{ContainerPort: 9090},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, deployment)
+			if err != nil && !errors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("Creating the SleepyService resource with multiple ports")
+			sleepyService := &sleepyv1alpha1.SleepyService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: namespace,
+				},
+				Spec: sleepyv1alpha1.SleepyServiceSpec{
+					BackendService: &sleepyv1alpha1.BackendServiceSpec{
+						Ports: []sleepyv1alpha1.ServicePort{
+							{
+								Name:       "http",
+								Port:       8055,
+								TargetPort: intstr.FromInt(8055),
+							},
+							{
+								Name:       "admin",
+								Port:       8056,
+								TargetPort: intstr.FromInt(8056),
+							},
+							{
+								Name:       "metrics",
+								Port:       9090,
+								TargetPort: intstr.FromInt(9090),
+							},
+						},
+					},
+					HealthPath:  "/health",
+					WakeTimeout: metav1.Duration{Duration: 5 * time.Minute},
+					IdleTimeout: metav1.Duration{Duration: 10 * time.Minute},
+					Components: []sleepyv1alpha1.Component{
+						{
+							Name: "app",
+							Type: sleepyv1alpha1.ComponentTypeDeployment,
+							Ref: sleepyv1alpha1.ResourceRef{
+								Name: deploymentName,
+							},
+							Replicas: int32Ptr(1),
+						},
+					},
+				},
+			}
+			err = k8sClient.Create(ctx, sleepyService)
+			if err != nil && !errors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		})
+
+		AfterEach(func() {
+			By("Cleaning up resources")
+			resource := &sleepyv1alpha1.SleepyService{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
+
+			deployment := &appsv1.Deployment{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, deployment)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, deployment)).To(Succeed())
+			}
+
+			proxyDeployment := &appsv1.Deployment{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-wakeproxy", Namespace: namespace}, proxyDeployment)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, proxyDeployment)).To(Succeed())
+			}
+
+			proxyService := &corev1.Service{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, proxyService)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, proxyService)).To(Succeed())
+			}
+		})
+
+		It("should create proxy deployment and service with all ports", func() {
+			By("Reconciling the created resource")
+			controllerReconciler := &SleepyServiceReconciler{
+				Client:        k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				OperatorImage: operatorImage,
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking that proxy deployment was created with multiple ports")
+			proxyDeployment := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      resourceName + "-wakeproxy",
+					Namespace: namespace,
+				}, proxyDeployment)
+			}, timeout, interval).Should(Succeed())
+
+			By("Validating all container ports are present")
+			Expect(proxyDeployment.Spec.Template.Spec.Containers).To(HaveLen(1))
+			container := proxyDeployment.Spec.Template.Spec.Containers[0]
+			Expect(container.Ports).To(HaveLen(3))
+
+			Expect(container.Ports[0].Name).To(Equal("http"))
+			Expect(container.Ports[0].ContainerPort).To(Equal(int32(8055)))
+
+			Expect(container.Ports[1].Name).To(Equal("admin"))
+			Expect(container.Ports[1].ContainerPort).To(Equal(int32(8056)))
+
+			Expect(container.Ports[2].Name).To(Equal("metrics"))
+			Expect(container.Ports[2].ContainerPort).To(Equal(int32(9090)))
+
+			By("Validating environment variables include all ports")
+			envMap := make(map[string]string)
+			for _, env := range container.Env {
+				envMap[env.Name] = env.Value
+			}
+			Expect(envMap).To(HaveKey("BACKEND_HOST"))
+			Expect(envMap["BACKEND_HOST"]).To(Equal("test-multiport-service-actual.default"))
+			Expect(envMap).To(HaveKey("BACKEND_PORTS"))
+			Expect(envMap["BACKEND_PORTS"]).To(Equal("8055,8056,9090"))
+
+			By("Checking that proxy service was created with multiple ports")
+			proxyService := &corev1.Service{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      resourceName,
+					Namespace: namespace,
+				}, proxyService)
+			}, timeout, interval).Should(Succeed())
+
+			By("Validating all service ports are present")
+			Expect(proxyService.Spec.Ports).To(HaveLen(3))
+
+			Expect(proxyService.Spec.Ports[0].Name).To(Equal("http"))
+			Expect(proxyService.Spec.Ports[0].Port).To(Equal(int32(8055)))
+			Expect(proxyService.Spec.Ports[0].TargetPort.IntVal).To(Equal(int32(8055)))
+
+			Expect(proxyService.Spec.Ports[1].Name).To(Equal("admin"))
+			Expect(proxyService.Spec.Ports[1].Port).To(Equal(int32(8056)))
+			Expect(proxyService.Spec.Ports[1].TargetPort.IntVal).To(Equal(int32(8056)))
+
+			Expect(proxyService.Spec.Ports[2].Name).To(Equal("metrics"))
+			Expect(proxyService.Spec.Ports[2].Port).To(Equal(int32(9090)))
+			Expect(proxyService.Spec.Ports[2].TargetPort.IntVal).To(Equal(int32(9090)))
+		})
+	})
 	Context("When building proxy environment variables", func() {
 		var reconciler *SleepyServiceReconciler
 
@@ -475,7 +670,6 @@ var _ = Describe("SleepyService Controller", func() {
 			Expect(envMap["WAKE_TIMEOUT"]).To(Equal("3m0s"))
 			Expect(envMap["IDLE_TIMEOUT"]).To(Equal("15m0s"))
 			Expect(envMap["DEPLOYMENT_NAME"]).To(Equal("my-app"))
-			Expect(envMap["BACKEND_URL"]).To(Equal("http://test-actual.test-ns:8080"))
 			Expect(envMap["DESIRED_REPLICAS"]).To(Equal("3"))
 		})
 
@@ -514,7 +708,7 @@ var _ = Describe("SleepyService Controller", func() {
 				envMap[e.Name] = e.Value
 			}
 
-			Expect(envMap["BACKEND_URL"]).To(Equal("http://test-actual.default:8080"))
+			Expect(envMap["BACKEND_HOST"]).To(Equal("test-actual.default"))
 		})
 	})
 
@@ -1967,53 +2161,6 @@ var _ = Describe("SleepyService Controller", func() {
 				_, err := reconciler.findAppComponent(hs)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("no Deployment or StatefulSet component found"))
-			})
-
-			It("should get backend service port from spec", func() {
-				hs := &sleepyv1alpha1.SleepyService{
-					Spec: sleepyv1alpha1.SleepyServiceSpec{
-						BackendService: &sleepyv1alpha1.BackendServiceSpec{
-							Ports: []sleepyv1alpha1.ServicePort{
-								{
-									Port:       8080,
-									TargetPort: intstr.FromInt(8080),
-								},
-							},
-						},
-					},
-				}
-
-				port := reconciler.getBackendServicePort(hs)
-				Expect(port).To(Equal(int32(8080)))
-			})
-
-			It("should return default backend service port when not specified", func() {
-				hs := &sleepyv1alpha1.SleepyService{
-					Spec: sleepyv1alpha1.SleepyServiceSpec{},
-				}
-
-				port := reconciler.getBackendServicePort(hs)
-				Expect(port).To(Equal(int32(80)))
-			})
-
-			It("should get health path from spec", func() {
-				hs := &sleepyv1alpha1.SleepyService{
-					Spec: sleepyv1alpha1.SleepyServiceSpec{
-						HealthPath: "/healthz",
-					},
-				}
-
-				path := reconciler.getHealthPath(hs)
-				Expect(path).To(Equal("/healthz"))
-			})
-
-			It("should return default health path when not specified", func() {
-				hs := &sleepyv1alpha1.SleepyService{
-					Spec: sleepyv1alpha1.SleepyServiceSpec{},
-				}
-
-				path := reconciler.getHealthPath(hs)
-				Expect(path).To(Equal("/health"))
 			})
 		})
 	})
