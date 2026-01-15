@@ -345,6 +345,10 @@ jobs:
           sed -i "s/^version:.*/version: ${{ steps.version.outputs.chart_version }}/" dist/chart/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.chart_version }}\"/" dist/chart/Chart.yaml
 
+      - name: Update values.yaml image tag
+        run: |
+          sed -i "s/tag: latest/tag: ${{ steps.version.outputs.chart_version }}/" dist/chart/values.yaml
+
       - name: Login to GitHub Container Registry
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} --username ${{ github.actor }} --password-stdin
